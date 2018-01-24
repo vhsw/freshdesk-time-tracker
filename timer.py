@@ -100,15 +100,17 @@ if ans1 and ans2:
 
 if times:
     print("\nFRESHDESK:")
-
+    customer_max_len = max([len(time['time_entry']['customer_name']) for time in times if
+                            datetime.strptime(time['time_entry']['executed_at'].split('T')[0],
+                                              '%Y-%m-%d').date() == date])
     for time in times:
         time = time['time_entry']
         day = datetime.strptime(time['executed_at'].split('T')[0], '%Y-%m-%d')
         if day.date() == date:
             print(("Ticket: https://support.hydra-billing.com/helpdesk/tickets/" + str(time['ticket_id'])))
-            print(("\tBillable: " + str(time['billable']).ljust(7) + "Spent: " +
-                   hours2hhmm(float(time['timespent'])).ljust(6) + ' Client: ' +
-                   time['customer_name'].ljust(16) + 'Note: ' + time['note']))
+            print(("\tBillable: " + str(time['billable']).ljust(6) + "Spent: " +
+                   hours2hhmm(float(time['timespent'])).ljust(5) + ' Client: ' +
+                   time['customer_name'].ljust(customer_max_len + 1) + 'Note: ' + time['note'][:-1]))
 
             if (time['billable']):
                 bill_time_fd += float(time['timespent'])
