@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
+import argparse
 import os.path
-# import re
-import sys
 from datetime import datetime, date, timedelta
 
 import requests
@@ -70,42 +68,36 @@ except:
     with open(credents_tw, 'w+') as f:
         f.write(tw_id + '\n' + tw_key)
 
-if len(sys.argv) == 1:
-    # # Date ask and parse
-    # print("Now enter one of these:")
-    # print("- Date in DD.MM.YYYY format")
-    # print("- Date in YYYY/MM/DD format")
-    # print("- Date in YYYY-MM-DD format")
-    # print("- Number of days to look back (0 - today, 1 - yesterday, so on)")
-    # ans = input("- Or just hit enter for today [0]:")
-    # if re.compile("\d{2}\.\d{2}\.\d{4}").match(ans):
-    #     date = datetime.strptime(ans, "%d.%m.%Y").date()
-    # elif re.compile("\d{4}\/\d{2}\/\d{2}").match(ans):
-    #     date = datetime.strptime(ans, "%Y/%m/%d").date()
-    # elif re.compile("\d{4}\-\d{2}\-\d{2}").match(ans):
-    #     date = datetime.strptime(ans, "%Y-%m-%d").date()
-    # elif re.compile("\d{1,10}").match(ans):
-    #     date = date.today() - timedelta(days=int(ans))
-    # else:
-    #     date = date.today()
-    date = date.today()  # + timedelta(days=1)
-else:
-    date = date.today() - timedelta(days=int(sys.argv[1]))
+date = date.today()
+
+parser = argparse.ArgumentParser(description='Simple time tracker for Freshdesk')
+parser.add_argument('offset', action='store', type=int, nargs='?', default=0, help='Offset in days from today')
+parser.set_defaults(offset=0)
+
+results = parser.parse_args()
+
+date -= timedelta(days=int(results.offset))
 
 print(date.strftime('%d %B %Y'))
 
 # Freshdesk
-proxies = {
-    "http": None,
-    "https": None,
-}
-ans1 = requests.get('https://latera.freshdesk.com/helpdesk/'
-                    'time_sheets.json?agent_id=' + agent_id + '&billable=true',
-                    auth=(api_key, 'X'))
-ans2 = requests.get('https://latera.freshdesk.com/helpdesk/'
-                    'time_sheets.json?agent_id=' + agent_id + '&billable=false',
-                    auth=(api_key, 'X'))
-times = sorted(ans1.json() + ans2.json(), key=lambda k: k['time_entry']['ticket_id'])
+ans1 = None
+ans2 = None
+times = None
+try:
+    ans1 = requests.get('https://latera.freshdesk.com/helpdesk/'
+                        'time_sheets.json?agent_id=' + agent_id + '&billable=true',
+                        auth=(api_key, 'X'))
+
+    ans2 = requests.get('https://latera.freshdesk.com/helpdesk/'
+                        'time_sheets.json?agent_id=' + agent_id + '&billable=false',
+                        auth=(api_key, 'X'))
+
+except requests.exceptions.RequestException as e:
+    print(e)
+if ans1 and ans2:
+    times = sorted(ans1.json() + ans2.json(), key=lambda k: k['time_entry']['ticket_id'])
+
 if times:
     print("\nFRESHDESK:")
 
@@ -116,7 +108,7 @@ if times:
             print(("Ticket: https://support.hydra-billing.com/helpdesk/tickets/" + str(time['ticket_id'])))
             print(("\tBillable: " + str(time['billable']).ljust(7) + "Spent: " +
                    hours2hhmm(float(time['timespent'])).ljust(6) + ' Client: ' +
-                   time['customer_name'].ljust(15) + 'Note: ' + time['note']))
+                   time['customer_name'].ljust(16) + 'Note: ' + time['note']))
 
             if (time['billable']):
                 bill_time_fd += float(time['timespent'])
