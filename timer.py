@@ -1,204 +1,262 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import argparse
-import os.path
-from datetime import datetime, date, timedelta
+import configparser
+from datetime import datetime, date, timedelta as td
 
 import requests
+from requests.adapters import HTTPAdapter
 from requests.auth import HTTPBasicAuth
 
-# Variables
-total_time = 0
-bill_time_fd = 0
-free_time_fd = 0
-time_jira = 0
-bill_time_tw = 0
-free_time_tw = 0
+
+class Time(object):
+    format = '''{sign}{day}{hour:02}:{minute:02}'''
+
+    def __init__(self, time=None):
+        """Args:
+                time (int) time span in seconds
+                time (str) time span in format HH:MM
+                time (tuple) (hh,mm)
+                time (Time)
+        """
+        if time is None:
+            self.time = 0.0
+        elif isinstance(time, (int, float)):
+            self.time = float(time)
+        elif type(time) is str:
+            self.time = float(time[:2]) * 3600.0 + float(time[3:]) * 60.0
+        elif type(time) is tuple:
+            self.time = time[0] * 3600.0 + time[1] * 60.0
+        elif type(time) is td:
+            self.time = time.total_seconds()
+        elif type(time) is Time:
+            self.time = time.time
+        else:
+            raise TypeError('Time must be integer number of seconds or string in format HH:MM')
+
+    def __repr__(self):
+        negative = self.time < 0
+        total_seconds = round(abs(self.time))
+
+        msec = 60
+        hsec = 60 * msec
+        dsec = 24 * hsec
+
+        day = total_seconds // dsec
+        total_seconds -= day * dsec
+
+        hour = total_seconds // hsec
+        total_seconds -= hour * hsec
+
+        minute = total_seconds // msec
+        total_seconds -= minute * msec
+
+        second = total_seconds
+
+        repr = Time.format.format(sign='-' if negative else '',
+                                  day=f'{day} day ' if day > 0 else '',
+                                  hour=hour,
+                                  minute=minute,
+                                  second=second)
+        return repr
+
+    def __add__(self, other):
+        if other == 0:
+            return self
+        return Time(self.time + other.time)
+
+    def __radd__(self, other):
+        if type(other) is int:
+            return self
+        else:
+            return self.__add__(other)
+
+    def __sub__(self, other):
+        return self.__add__(Time(-other.time))
+
+    def __lt__(self, other):
+        return self.time < other.time
+
+    def __le__(self, other):
+        return self.time <= other.time
 
 
-def hours2hhmm(f_hours):
-    return '{0:02d}:{1:02d}'.format(int(f_hours), int((f_hours * 60) % 60))
+class Entry(object):
+    def __init__(self, entry_id, billable, spent, note=''):
+        self.id = entry_id
+        self.billable = billable
+        self.spent = spent
+        self.note = note
 
 
-# Files to store credentials
-credents_fd = os.path.expanduser("~/.freshdesk_credentials")
-credents_jr = os.path.expanduser("~/.jira_credentials")
-credents_tw = os.path.expanduser("~/.teamwork_credentials")
+class TicketingSystem(object):
+    def prepare_url(self):
+        raise (Exception, 'Not implemented')
 
-# Load/ask Freshdesk credentials
-try:
-    with open(credents_fd) as f:
-        data = f.readlines()
-        data = [s.strip() for s in data]
-    agent_id = str(data[0])
-    api_key = str(data[1])
-except:
-    agent_id = input("Enter your agent ID in freshdesk: ")
-    api_key = input("Enter your API key (found at https://"
-                    "support.hydra-billing.com/profiles/"
-                    + agent_id + "/): ")
-    with open(credents_fd, 'w+') as f:
-        f.write(agent_id + '\n' + api_key)
+    def get_json(self):
+        try:
+            s = requests.Session()
+            s.mount('https://', HTTPAdapter(max_retries=self.max_retries))
+            ans = s.get(self.api_url, params=self.params, auth=self.auth, timeout=self.timeout)
+        except requests.ConnectTimeout:
+            print('Connection timeout...')
+            raise
+        return ans.json()
 
-# Load/ask Jira credentials
-try:
-    with open(credents_jr) as f:
-        data = f.readlines()
-        data = [s.strip() for s in data]
-    login_jira = str(data[0])
-    passw_jira = str(data[1])
-except:
-    login_jira = input("Enter your JIRA login: ")
-    passw_jira = input("Enter your JIRA password: ")
-    with open(credents_jr, 'w+') as f:
-        f.write(login_jira + '\n' + passw_jira)
+    def parse_json(self):
+        raise (Exception, 'Not implemented')
 
-# Load/ask Teamwork credentials
-try:
-    with open(credents_tw) as f:
-        data = f.readlines()
-        data = [s.strip() for s in data]
-    tw_id = str(data[0])
-    tw_key = str(data[1])
-except:
-    tw_id = input("Enter your agent ID in teamwork: ")
-    tw_key = input("Enter your API key (found at http://"
-                   "pm.hydra-billing.com/#/people/"
-                   + tw_id + "/details -> Edit My Profile -> API&Mobile): ")
-    with open(credents_tw, 'w+') as f:
-        f.write(tw_id + '\n' + tw_key)
+    def get_billable(self):
+        time = Time(sum(i.spent for i in self.entries if i.billable))
+        return time
 
-date = date.today()
+    def get_notbillable(self):
+        time = Time(sum(i.spent for i in self.entries if not i.billable))
+        return time
+
+    def get_total(self):
+        return self.get_billable() + self.get_notbillable()
+
+    def __init__(self, config, report_date):
+        self.config = config
+        self.report_date = report_date
+        self.auth = None
+        self.params = None
+        self.url = None
+        self.api_url = None
+        self.max_retries = 5
+        self.timeout = 3
+        self.entries = []
+        self.entry_url = None
+
+    def __repr__(self):
+        res = []
+        for entry in self.entries:
+            res.append(
+                f'''{self.entry_url}{entry.id}'''
+                f'''\n\t{'Billable' if entry.billable else 'Not billable'}: {entry.spent} {entry.note}''')
+        return '\n'.join(res)
+
+
+class Freshesk(TicketingSystem):
+    def __init__(self, config, report_date, offset):
+        TicketingSystem.__init__(self, config, report_date)
+        self.report_date -= td(hours=self.config.getint('freshdesk', 'tz_shift')) + td(seconds=1)
+        self.auth = (self.config.get('freshdesk', 'api_key'), 'X')
+        self.params = {'agent_id': self.config.get('freshdesk', 'agent_id'),
+                       'executed_after': self.report_date.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                       'executed_before': (self.report_date + td(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ')}
+        self.url = self.config.get('freshdesk', 'url')
+        self.api_url = self.url + '/api/v2/time_entries'
+        self.entry_url = self.url + '/a/tickets/'
+        self.entries = [Entry(entry_id=i.get('ticket_id'),
+                              billable=i.get('billable'),
+                              spent=Time(i.get('time_spent')),
+                              note=i.get('note'))
+                        for i in sorted(self.get_json(),
+                                        key=lambda k: (k.get('ticket_id'), k.get('updated_at')))]
+
+
+class TeamWork(TicketingSystem):
+    def __init__(self, config_path, report_date, offset):
+        TicketingSystem.__init__(self, config_path, report_date)
+        self.auth = HTTPBasicAuth(self.config.get('teamwork', 'api_key'), 'X')
+        self.url = self.config.get('teamwork', 'url')
+        self.api_url = self.url + '/time_entries.json'
+        self.params = params = {
+            'userId': self.config.get('teamwork', 'agent_id'),
+            'fromdate': self.report_date.strftime('%Y%m%d'),
+            'todate': self.report_date.strftime('%Y%m%d')
+        }
+        self.entries = [Entry(entry_id=i.get('todo-item-id'),
+                              spent=(i.get('hours'), i.get('minutes')),
+                              billable=(i.get('isbillable') == 1),
+                              note=i.get('project-name'))
+                        for i in sorted(self.get_json().get('time-entries'))]
+
+
+class Jira(TicketingSystem):
+    def __init__(self, config_path, report_date, offset):
+        TicketingSystem.__init__(self, config_path, report_date)
+        jira_login = self.config.get('jira', 'login')
+        jira_pass = self.config.get('jira', 'password')
+        self.auth = HTTPBasicAuth(jira_login, jira_pass)
+        self.url = self.config.get('jira', 'url')
+        self.api_url = self.url + '/rest/api/2/search'
+        self.entry_url = self.url + '/browse/'
+        json = requests.post(self.api_url,
+                             headers={"Content-Type": "application/json"},
+                             json={
+                                 'jql': f'''worklogAuthor = {jira_login} AND worklogDate = {self.report_date.strftime('%Y-%m-%d')}''',
+                                 "fields": ["key"],
+                                 "maxResults": 1000},
+                             auth=HTTPBasicAuth(jira_login, jira_pass)).json()
+        entries = []
+        for issue in json['issues']:
+            ans = requests.get(f'{self.url}/rest/api/2/issue/' +
+                               issue['key'] + '/worklog',
+                               auth=HTTPBasicAuth(jira_login, jira_pass)).json()
+            for worklog in ans['worklogs']:
+                if (worklog['author']['name'] == jira_login and
+                        worklog['started'].split('T')[0] == report_date.strftime('%Y-%m-%d')):
+                    time_spent = int(worklog.get('timeSpentSeconds'))
+                    entries.append(Entry(entry_id=issue.get('key'),
+                                         billable=False,
+                                         spent=Time(time_spent),
+                                         note=worklog.get('comment')))
+        self.entries = entries
+
 
 parser = argparse.ArgumentParser(description='Simple time tracker for Freshdesk')
-parser.add_argument('offset', action='store', type=int, nargs='?', default=0, help='Offset in days from today')
-parser.set_defaults(offset=0)
+parser.add_argument('config_path', action='store', type=str, nargs='?', help='Path to config')
+parser.add_argument('offset', action='store', type=int, nargs='?', help='Offset in days from today')
+parser.set_defaults(offset=0, config_path='./config.ini')
 
-results = parser.parse_args()
+args = parser.parse_args()
 
-date -= timedelta(days=int(results.offset))
+config = configparser.RawConfigParser()
+config.read(args.config_path)
+offset = args.offset
+report_date = datetime.combine(date.today(), datetime.min.time()) - td(days=offset)
 
-print(date.strftime('%d %B %Y'))
+print(report_date.strftime('%d %b %Y'))
+print()
 
-# Freshdesk
-ans1 = None
-ans2 = None
-times = None
-try:
-    ans1 = requests.get('https://latera.freshdesk.com/helpdesk/'
-                        'time_sheets.json?agent_id=' + agent_id + '&billable=true',
-                        auth=(api_key, 'X'))
+fd = Freshesk(config, report_date, offset)
+print(fd)
+ji = Jira(config, report_date, offset)
+print(ji)
+tw = TeamWork(config, report_date, offset)
+print(tw)
 
-    ans2 = requests.get('https://latera.freshdesk.com/helpdesk/'
-                        'time_sheets.json?agent_id=' + agent_id + '&billable=false',
-                        auth=(api_key, 'X'))
+workday_begin = Time(config.get('global', 'workday_begin'))
+workday_end = Time(config.get('global', 'workday_end'))
+launch_begin = Time(config.get('global', 'launch_begin'))
+launch_end = Time(config.get('global', 'launch_end'))
 
-except requests.exceptions.RequestException as e:
-    print(e)
-if ans1 and ans2:
-    times = sorted(ans1.json() + ans2.json(), key=lambda k: k['time_entry']['ticket_id'])
+launch_duration = launch_end - launch_begin
+workday_duration = workday_end - workday_begin - launch_duration
 
-if times:
-    print("\nFRESHDESK:")
-    customer_max_len = max([len(time['time_entry']['customer_name']) for time in times if
-                            datetime.strptime(time['time_entry']['executed_at'].split('T')[0],
-                                              '%Y-%m-%d').date() == date])
-    for time in times:
-        time = time['time_entry']
-        day = datetime.strptime(time['executed_at'].split('T')[0], '%Y-%m-%d')
-        if day.date() == date:
-            print(("Ticket: https://support.hydra-billing.com/helpdesk/tickets/" + str(time['ticket_id'])))
-            print(("\tBillable: " + str(time['billable']).ljust(6) + "Spent: " +
-                   hours2hhmm(float(time['timespent'])).ljust(5) + ' Client: ' +
-                   time['customer_name'].ljust(customer_max_len + 1) + 'Note: ' + time['note'][:-1]))
+time_now = Time((datetime.now().hour, datetime.now().minute))
+total_tracked_time = sum((fd.get_total(), tw.get_total(), ji.get_total()))
+if args.offset == 0 and workday_begin <= time_now <= workday_end:
+    total_time = time_now - workday_begin
+    if launch_begin <= time_now <= launch_end:
+        total_time = launch_begin - workday_begin
+    if time_now > launch_end:
+        total_time -= launch_duration
 
-            if (time['billable']):
-                bill_time_fd += float(time['timespent'])
-            else:
-                free_time_fd += float(time['timespent'])
-
-# Jira
-ans = requests.post('https://dev.latera.ru/rest/api/2/search',
-                    headers={"Content-Type": "application/json"},
-                    json={"jql": "worklogAuthor = " + login_jira +
-                                 " AND worklogDate = " + date.strftime('%Y-%m-%d'),
-                          "fields": ["key"],
-                          "maxResults": 1000},
-                    auth=HTTPBasicAuth(login_jira, passw_jira)).json()
-
-issues = ans['issues']
-
-if issues:
-    print("\nJIRA:")
-
-    for issue in ans['issues']:
-        ans = requests.get('https://dev.latera.ru/rest/api/2/issue/' +
-                           issue['key'] + '/worklog',
-                           auth=HTTPBasicAuth(login_jira, passw_jira)).json()
-        for worklog in ans['worklogs']:
-            if (worklog['author']['name'] == login_jira and
-                    worklog['started'].split('T')[0] == date.strftime('%Y-%m-%d')):
-                time_spent = round(float(worklog['timeSpentSeconds']) / 3600.0, 2)
-                print(('Issue:  https://dev.latera.ru/browse/' + issue['key']))
-                print(('\tSpent: ' + hours2hhmm(time_spent).ljust(6) + 'Note: ' + worklog['comment']))
-                time_jira += time_spent
-
-# Teamwork
-ans = requests.get('http://pm.hydra-billing.com/time_entries.json',
-                   params={
-                       'userId': tw_id,
-                       'fromdate': date.strftime('%Y%m%d'),
-                       'todate': date.strftime('%Y%m%d')
-                   },
-                   auth=HTTPBasicAuth(tw_key, 'X')).json()
-entries = ans['time-entries']
-
-if entries:
-    proj_name_len = max([len(s['project-name']) for s in entries])
-    list_name_len = max([len(s['todo-list-name']) for s in entries])
-    task_name_len = max([len(s['todo-item-name']) for s in entries])
-
-    print("\nTEAMWORK:")
-
-    for entry in entries:
-        entry_time = float(entry['hours']) + round(float(entry['minutes']) / 60.0, 2)
-        if entry['isbillable'] == '1':
-            bill_time_tw += entry_time
-            entry['isbillable'] = 'True'
-        else:
-            free_time_tw += entry_time
-            entry['isbillable'] = 'False'
-        print(('Task:   http://pm.hydra-billing.com/#tasks/' + entry['todo-item-id']))
-        print(('\tProject: ' + entry['project-name']))
-        print(('\tList: ' + entry['todo-list-name'].ljust(list_name_len + 1) +
-               ', Task: ' + entry['todo-item-name'].ljust(task_name_len + 1)))
-        if len(entry['tags']) == 0:
-            entry['tags'].append('')
-        print(('\tTime: ' + hours2hhmm(entry_time) + ', Billable: ' +
-               entry['isbillable'].ljust(5) + ', Tags: ' + ', '.join(entry['tags'][0])))
-        print(('\tComment: ' + entry['description']))
-
-total_time += (bill_time_fd +
-               free_time_fd +
-               time_jira +
-               bill_time_tw +
-               free_time_tw)
-
-if date == date.today() and 10 < datetime.now().hour < 19:
-    tracked_time = datetime.combine(date, datetime.min.time())
-    tracked_time += timedelta(hours=10) + timedelta(hours=total_time)
-    if datetime.now().hour > 13:
-        tracked_time += timedelta(hours=1)
-
-    tdelta = datetime.now() - tracked_time
+    untracked_time = total_time - total_tracked_time
 else:
-    tdelta = timedelta(hours=(8 - total_time))
+    untracked_time = workday_duration - total_tracked_time
+#
+print(f'''
+Total tracked time:    {sum((fd.get_total(), tw.get_total(), ji.get_total()))}
+- Freshdesk billable:  {fd.get_billable()}
+- Freshdesk free:      {fd.get_notbillable()}
+- Teamwork billable:   {tw.get_billable()}
+- Teamwork free:       {tw.get_notbillable()}
+- Jira:                {ji.get_notbillable()}
 
-print('\n\nTotal tracked time: ' + hours2hhmm(total_time))
-print('Untracked time by now: {0:02d}:{1:02d}'.format(tdelta.seconds // 3600, tdelta.seconds % 3600 // 60))
-print('Of which: ')
-print('- Freshdesk billable: ' + hours2hhmm(bill_time_fd))
-print('- Freshdesk free: ' + hours2hhmm(free_time_fd))
-print('- Jira: ' + hours2hhmm(time_jira))
-print('- Teamwork billable: ' + hours2hhmm(bill_time_tw))
-print('- Teamwork free: ' + hours2hhmm(free_time_tw))
+Untracked time{' by now' if offset == 0 else ''}: {untracked_time}
+''')
