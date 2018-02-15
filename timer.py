@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import argparse
-import os.path
+import configparser
 from datetime import datetime, date, timedelta
 
 import requests
@@ -15,58 +15,21 @@ time_jira = 0
 bill_time_tw = 0
 free_time_tw = 0
 
+config = configparser.RawConfigParser()
+
+config.read('config.ini')
+
 
 def hours2hhmm(f_hours):
     return '{0:02d}:{1:02d}'.format(int(f_hours), int((f_hours * 60) % 60))
 
 
-# Files to store credentials
-credents_fd = os.path.expanduser("~/.freshdesk_credentials")
-credents_jr = os.path.expanduser("~/.jira_credentials")
-credents_tw = os.path.expanduser("~/.teamwork_credentials")
-
-# Load/ask Freshdesk credentials
-try:
-    with open(credents_fd) as f:
-        data = f.readlines()
-        data = [s.strip() for s in data]
-    agent_id = str(data[0])
-    api_key = str(data[1])
-except:
-    agent_id = input("Enter your agent ID in freshdesk: ")
-    api_key = input("Enter your API key (found at https://"
-                    "support.hydra-billing.com/profiles/"
-                    + agent_id + "/): ")
-    with open(credents_fd, 'w+') as f:
-        f.write(agent_id + '\n' + api_key)
-
-# Load/ask Jira credentials
-try:
-    with open(credents_jr) as f:
-        data = f.readlines()
-        data = [s.strip() for s in data]
-    login_jira = str(data[0])
-    passw_jira = str(data[1])
-except:
-    login_jira = input("Enter your JIRA login: ")
-    passw_jira = input("Enter your JIRA password: ")
-    with open(credents_jr, 'w+') as f:
-        f.write(login_jira + '\n' + passw_jira)
-
-# Load/ask Teamwork credentials
-try:
-    with open(credents_tw) as f:
-        data = f.readlines()
-        data = [s.strip() for s in data]
-    tw_id = str(data[0])
-    tw_key = str(data[1])
-except:
-    tw_id = input("Enter your agent ID in teamwork: ")
-    tw_key = input("Enter your API key (found at http://"
-                   "pm.hydra-billing.com/#/people/"
-                   + tw_id + "/details -> Edit My Profile -> API&Mobile): ")
-    with open(credents_tw, 'w+') as f:
-        f.write(tw_id + '\n' + tw_key)
+freshdesk_id = config['freshdesk']['agent_id']
+freshdesk_api_key = config['freshdesk']['api_key']
+jira_login = config['jira']['login']
+jira_passw = config['jira']['password']
+tw_id = config['teamwork']['agent_id']
+tw_api_key = config['teamwork']['api_key']
 
 date = date.today()
 
@@ -86,12 +49,12 @@ ans2 = None
 times = None
 try:
     ans1 = requests.get('https://latera.freshdesk.com/helpdesk/'
-                        'time_sheets.json?agent_id=' + agent_id + '&billable=true',
-                        auth=(api_key, 'X'))
+                        'time_sheets.json?agent_id=' + freshdesk_id + '&billable=true',
+                        auth=(freshdesk_api_key, 'X'))
 
     ans2 = requests.get('https://latera.freshdesk.com/helpdesk/'
-                        'time_sheets.json?agent_id=' + agent_id + '&billable=false',
-                        auth=(api_key, 'X'))
+                        'time_sheets.json?agent_id=' + freshdesk_id + '&billable=false',
+                        auth=(freshdesk_api_key, 'X'))
 
 except requests.exceptions.RequestException as e:
     print(e)
@@ -120,11 +83,11 @@ if times:
 # Jira
 ans = requests.post('https://dev.latera.ru/rest/api/2/search',
                     headers={"Content-Type": "application/json"},
-                    json={"jql": "worklogAuthor = " + login_jira +
+                    json={"jql": "worklogAuthor = " + jira_login +
                                  " AND worklogDate = " + date.strftime('%Y-%m-%d'),
                           "fields": ["key"],
                           "maxResults": 1000},
-                    auth=HTTPBasicAuth(login_jira, passw_jira)).json()
+                    auth=HTTPBasicAuth(jira_login, jira_passw)).json()
 
 issues = ans['issues']
 
@@ -134,9 +97,9 @@ if issues:
     for issue in ans['issues']:
         ans = requests.get('https://dev.latera.ru/rest/api/2/issue/' +
                            issue['key'] + '/worklog',
-                           auth=HTTPBasicAuth(login_jira, passw_jira)).json()
+                           auth=HTTPBasicAuth(jira_login, jira_passw)).json()
         for worklog in ans['worklogs']:
-            if (worklog['author']['name'] == login_jira and
+            if (worklog['author']['name'] == jira_login and
                     worklog['started'].split('T')[0] == date.strftime('%Y-%m-%d')):
                 time_spent = round(float(worklog['timeSpentSeconds']) / 3600.0, 2)
                 print(('Issue:  https://dev.latera.ru/browse/' + issue['key']))
@@ -150,7 +113,7 @@ ans = requests.get('http://pm.hydra-billing.com/time_entries.json',
                        'fromdate': date.strftime('%Y%m%d'),
                        'todate': date.strftime('%Y%m%d')
                    },
-                   auth=HTTPBasicAuth(tw_key, 'X')).json()
+                   auth=HTTPBasicAuth(tw_api_key, 'X')).json()
 entries = ans['time-entries']
 
 if entries:
