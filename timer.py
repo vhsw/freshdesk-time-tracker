@@ -24,8 +24,7 @@ def hours2hhmm(f_hours):
     return '{0:02d}:{1:02d}'.format(int(f_hours), int((f_hours * 60) % 60))
 
 
-freshdesk_id = config['freshdesk']['agent_id']
-freshdesk_api_key = config['freshdesk']['api_key']
+
 jira_login = config['jira']['login']
 jira_passw = config['jira']['password']
 tw_id = config['teamwork']['agent_id']
@@ -44,41 +43,41 @@ date -= timedelta(days=int(results.offset))
 print(date.strftime('%d %B %Y'))
 
 # Freshdesk
-ans1 = None
-ans2 = None
-times = None
-try:
-    ans1 = requests.get('https://latera.freshdesk.com/helpdesk/'
-                        'time_sheets.json?agent_id=' + freshdesk_id + '&billable=true',
-                        auth=(freshdesk_api_key, 'X'))
-
-    ans2 = requests.get('https://latera.freshdesk.com/helpdesk/'
-                        'time_sheets.json?agent_id=' + freshdesk_id + '&billable=false',
-                        auth=(freshdesk_api_key, 'X'))
-
-except requests.exceptions.RequestException as e:
-    print(e)
-if ans1 and ans2:
-    times = sorted(ans1.json() + ans2.json(), key=lambda k: k['time_entry']['ticket_id'])
-
-if times:
-    print("\nFRESHDESK:")
-    customer_max_len = max([len(time['time_entry']['customer_name']) for time in times if
-                            datetime.strptime(time['time_entry']['executed_at'].split('T')[0],
-                                              '%Y-%m-%d').date() == date])
-    for time in times:
-        time = time['time_entry']
-        day = datetime.strptime(time['executed_at'].split('T')[0], '%Y-%m-%d')
-        if day.date() == date:
-            print(("Ticket: https://support.hydra-billing.com/helpdesk/tickets/" + str(time['ticket_id'])))
-            print(("\tBillable: " + str(time['billable']).ljust(6) + "Spent: " +
-                   hours2hhmm(float(time['timespent'])).ljust(5) + ' Client: ' +
-                   time['customer_name'].ljust(customer_max_len + 1) + 'Note: ' + time['note'][:-1]))
-
-            if (time['billable']):
-                bill_time_fd += float(time['timespent'])
-            else:
-                free_time_fd += float(time['timespent'])
+# ans1 = None
+# ans2 = None
+# times = None
+# try:
+#     ans1 = requests.get('https://latera.freshdesk.com/helpdesk/'
+#                         'time_sheets.json?agent_id=' + freshdesk_id + '&billable=true',
+#                         auth=(freshdesk_api_key, 'X'))
+#
+#     ans2 = requests.get('https://latera.freshdesk.com/helpdesk/'
+#                         'time_sheets.json?agent_id=' + freshdesk_id + '&billable=false',
+#                         auth=(freshdesk_api_key, 'X'))
+#
+# except requests.exceptions.RequestException as e:
+#     print(e)
+# if ans1 and ans2:
+#     times = sorted(ans1.json() + ans2.json(), key=lambda k: k['time_entry']['ticket_id'])
+#
+# if times:
+#     print("\nFRESHDESK:")
+#     customer_max_len = max([len(time['time_entry']['customer_name']) for time in times if
+#                             datetime.strptime(time['time_entry']['executed_at'].split('T')[0],
+#                                               '%Y-%m-%d').date() == date])
+#     for time in times:
+#         time = time['time_entry']
+#         day = datetime.strptime(time['executed_at'].split('T')[0], '%Y-%m-%d')
+#         if day.date() == date:
+#             print(("Ticket: https://support.hydra-billing.com/helpdesk/tickets/" + str(time['ticket_id'])))
+#             print(("\tBillable: " + str(time['billable']).ljust(6) + "Spent: " +
+#                    hours2hhmm(float(time['timespent'])).ljust(5) + ' Client: ' +
+#                    time['customer_name'].ljust(customer_max_len + 1) + 'Note: ' + time['note'][:-1]))
+#
+#             if (time['billable']):
+#                 bill_time_fd += float(time['timespent'])
+#             else:
+#                 free_time_fd += float(time['timespent'])
 
 # Jira
 ans = requests.post('https://dev.latera.ru/rest/api/2/search',
