@@ -208,8 +208,8 @@ class Jira(TicketingSystem):
 
 
 parser = argparse.ArgumentParser(description='Simple time tracker for Freshdesk')
-parser.add_argument('offset', action='store', type=int, nargs='?', help='Offset in days from today')
 parser.add_argument('config_path', action='store', type=str, nargs='?', help='Path to config')
+parser.add_argument('offset', action='store', type=int, nargs='?', help='Offset in days from today')
 parser.set_defaults(offset=0, config_path='./config.ini')
 
 args = parser.parse_args()
