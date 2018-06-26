@@ -9,36 +9,61 @@ from requests.adapters import HTTPAdapter
 from requests.auth import HTTPBasicAuth
 
 
-class SpentTime(object):
+class Time(object):
+    format = '''{sign}{day}{hour:02}:{minute:02}'''
+
     def __init__(self, time=None):
         """Args:
                 time (int) time span in seconds
                 time (str) time span in format HH:MM
                 time (tuple) (hh,mm)
-                time (SpentTime)
+                time (Time)
         """
         if time is None:
-            self.time = td(0)
-        elif type(time) is int:
-            self.time = td(seconds=time)
+            self.time = 0.0
+        elif isinstance(time, (int, float)):
+            self.time = float(time)
         elif type(time) is str:
-            self.time = td(hours=int(time[:2]), minutes=int(time[3:]))
+            self.time = float(time[:2]) * 3600.0 + float(time[3:]) * 60.0
         elif type(time) is tuple:
-            self.time = td(hours=time[0], minutes=time[1])
-        elif type(time) is SpentTime:
+            self.time = time[0] * 3600.0 + time[1] * 60.0
+        elif type(time) is td:
+            self.time = time.total_seconds()
+        elif type(time) is Time:
             self.time = time.time
         else:
             raise TypeError('Time must be integer number of seconds or string in format HH:MM')
 
     def __repr__(self):
-        minutes = round(self.time.seconds / 60)
-        dt = datetime.min + td(minutes=minutes)
-        return dt.strftime('%H:%M')
+        negative = self.time < 0
+        total_seconds = round(abs(self.time))
+
+        msec = 60
+        hsec = 60 * msec
+        dsec = 24 * hsec
+
+        day = total_seconds // dsec
+        total_seconds -= day * dsec
+
+        hour = total_seconds // hsec
+        total_seconds -= hour * hsec
+
+        minute = total_seconds // msec
+        total_seconds -= minute * msec
+
+        second = total_seconds
+
+        repr = Time.format.format(sign='-' if negative else '',
+                                  day=f'{day} day ' if day > 0 else '',
+                                  hour=hour,
+                                  minute=minute,
+                                  second=second)
+        return repr
 
     def __add__(self, other):
         if other == 0:
             return self
-        return SpentTime(self.time.seconds + other.time.seconds)
+        return Time(self.time + other.time)
 
     def __radd__(self, other):
         if type(other) is int:
@@ -47,13 +72,13 @@ class SpentTime(object):
             return self.__add__(other)
 
     def __sub__(self, other):
-        return self.__add__(SpentTime(-other.time.seconds))
+        return self.__add__(Time(-other.time))
 
     def __lt__(self, other):
-        return self.time.seconds < other.time.seconds
+        return self.time < other.time
 
     def __le__(self, other):
-        return self.time.seconds <= other.time.seconds
+        return self.time <= other.time
 
 
 class Entry(object):
@@ -82,19 +107,19 @@ class TicketingSystem(object):
         raise (Exception, 'Not implemented')
 
     def get_billable(self):
-        time = SpentTime(sum(i.spent for i in self.entries if i.billable))
+        time = Time(sum(i.spent for i in self.entries if i.billable))
         return time
 
     def get_notbillable(self):
-        time = SpentTime(sum(i.spent for i in self.entries if not i.billable))
+        time = Time(sum(i.spent for i in self.entries if not i.billable))
         return time
 
     def get_total(self):
         return self.get_billable() + self.get_notbillable()
 
-    def __init__(self, config, report_date, offset):
+    def __init__(self, config, report_date):
         self.config = config
-        self.report_date = report_date - td(days=offset)
+        self.report_date = report_date
         self.auth = None
         self.params = None
         self.url = None
@@ -115,7 +140,7 @@ class TicketingSystem(object):
 
 class Freshesk(TicketingSystem):
     def __init__(self, config, report_date, offset):
-        TicketingSystem.__init__(self, config, report_date, offset)
+        TicketingSystem.__init__(self, config, report_date)
         self.report_date -= td(hours=self.config.getint('freshdesk', 'tz_shift')) + td(seconds=1)
         self.auth = (self.config.get('freshdesk', 'api_key'), 'X')
         self.params = {'agent_id': self.config.get('freshdesk', 'agent_id'),
@@ -126,7 +151,7 @@ class Freshesk(TicketingSystem):
         self.entry_url = self.url + '/a/tickets/'
         self.entries = [Entry(entry_id=i.get('ticket_id'),
                               billable=i.get('billable'),
-                              spent=SpentTime(i.get('time_spent')),
+                              spent=Time(i.get('time_spent')),
                               note=i.get('note'))
                         for i in sorted(self.get_json(),
                                         key=lambda k: (k.get('ticket_id'), k.get('updated_at')))]
@@ -134,7 +159,7 @@ class Freshesk(TicketingSystem):
 
 class TeamWork(TicketingSystem):
     def __init__(self, config_path, report_date, offset):
-        TicketingSystem.__init__(self, config_path, report_date, offset)
+        TicketingSystem.__init__(self, config_path, report_date)
         self.auth = HTTPBasicAuth(self.config.get('teamwork', 'api_key'), 'X')
         self.url = self.config.get('teamwork', 'url')
         self.api_url = self.url + '/time_entries.json'
@@ -152,7 +177,7 @@ class TeamWork(TicketingSystem):
 
 class Jira(TicketingSystem):
     def __init__(self, config_path, report_date, offset):
-        TicketingSystem.__init__(self, config_path, report_date, offset)
+        TicketingSystem.__init__(self, config_path, report_date)
         jira_login = self.config.get('jira', 'login')
         jira_pass = self.config.get('jira', 'password')
         self.auth = HTTPBasicAuth(jira_login, jira_pass)
@@ -177,7 +202,7 @@ class Jira(TicketingSystem):
                     time_spent = int(worklog.get('timeSpentSeconds'))
                     entries.append(Entry(entry_id=issue.get('key'),
                                          billable=False,
-                                         spent=SpentTime(time_spent),
+                                         spent=Time(time_spent),
                                          note=worklog.get('comment')))
         self.entries = entries
 
@@ -191,9 +216,12 @@ args = parser.parse_args()
 
 config = configparser.RawConfigParser()
 config.read(args.config_path)
-
-report_date = datetime.combine(date.today(), datetime.min.time())
 offset = args.offset
+report_date = datetime.combine(date.today(), datetime.min.time()) - td(days=offset)
+
+print(report_date.strftime('%d %b %Y'))
+print()
+
 fd = Freshesk(config, report_date, offset)
 print(fd)
 ji = Jira(config, report_date, offset)
@@ -201,15 +229,15 @@ print(ji)
 tw = TeamWork(config, report_date, offset)
 print(tw)
 
-workday_begin = SpentTime(config.get('global', 'workday_begin'))
-workday_end = SpentTime(config.get('global', 'workday_end'))
-launch_begin = SpentTime(config.get('global', 'launch_begin'))
-launch_end = SpentTime(config.get('global', 'launch_end'))
+workday_begin = Time(config.get('global', 'workday_begin'))
+workday_end = Time(config.get('global', 'workday_end'))
+launch_begin = Time(config.get('global', 'launch_begin'))
+launch_end = Time(config.get('global', 'launch_end'))
 
 launch_duration = launch_end - launch_begin
 workday_duration = workday_end - workday_begin - launch_duration
 
-time_now = SpentTime((datetime.now().hour, datetime.now().minute))
+time_now = Time((datetime.now().hour, datetime.now().minute))
 total_tracked_time = sum((fd.get_total(), tw.get_total(), ji.get_total()))
 if args.offset == 0 and workday_begin <= time_now <= workday_end:
     total_time = time_now - workday_begin
@@ -230,5 +258,5 @@ Total tracked time:    {sum((fd.get_total(), tw.get_total(), ji.get_total()))}
 - Teamwork free:       {tw.get_notbillable()}
 - Jira:                {ji.get_notbillable()}
 
-Untracked time by now: {untracked_time}
+Untracked time{' by now' if offset == 0 else ''}: {untracked_time}
 ''')
