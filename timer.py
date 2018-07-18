@@ -2,39 +2,33 @@
 # -*- coding: utf-8 -*-
 import argparse
 import configparser
+from dataclasses import dataclass
+from dataclasses import field
 from datetime import datetime, date, timedelta as td
 
 import requests
+import urllib3
 from requests.adapters import HTTPAdapter
 from requests.auth import HTTPBasicAuth
 
 
+@dataclass(order=True)
 class Time(object):
-    format = '''{sign}{day}{hour:02}:{minute:02}'''
+    time: float = field(compare=True, default=0.0)
 
-    def __init__(self, time=None):
-        """Args:
-                time (int) time span in seconds
-                time (str) time span in format HH:MM
-                time (tuple) (hh,mm)
-                time (Time)
-        """
-        if time is None:
-            self.time = 0.0
-        elif isinstance(time, (int, float)):
-            self.time = float(time)
-        elif type(time) is str:
-            self.time = float(time[:2]) * 3600.0 + float(time[3:]) * 60.0
-        elif type(time) is tuple:
-            self.time = time[0] * 3600.0 + time[1] * 60.0
-        elif type(time) is td:
-            self.time = time.total_seconds()
-        elif type(time) is Time:
-            self.time = time.time
-        else:
-            raise TypeError('Time must be integer number of seconds or string in format HH:MM')
+    @classmethod
+    def from_string(cls, string):
+        seconds = float(string[:2]) * 3600.0 + float(string[3:]) * 60.0
+        return cls(seconds)
 
-    def __repr__(self):
+    @classmethod
+    def from_params(cls, hours=0, minutes=0, seconds=0):
+        seconds = hours * 3600 + minutes * 60 + seconds
+        return cls(seconds)
+
+    def __format__(self, t_format=None):
+        if not t_format:
+            t_format = '''{sign}{day}{hour:02}:{minute:02}'''
         negative = self.time < 0
         total_seconds = round(abs(self.time))
 
@@ -53,12 +47,15 @@ class Time(object):
 
         second = total_seconds
 
-        repr = Time.format.format(sign='-' if negative else '',
-                                  day=f'{day} day ' if day > 0 else '',
-                                  hour=hour,
-                                  minute=minute,
-                                  second=second)
+        repr = t_format.format(sign='-' if negative else '',
+                               day=f'{day} day ' if day > 0 else '',
+                               hour=hour,
+                               minute=minute,
+                               second=second)
         return repr
+
+    def __repr__(self):
+        return self.__format__('''{sign}{day}{hour:02}:{minute:02}''')
 
     def __add__(self, other):
         if other == 0:
@@ -74,19 +71,13 @@ class Time(object):
     def __sub__(self, other):
         return self.__add__(Time(-other.time))
 
-    def __lt__(self, other):
-        return self.time < other.time
 
-    def __le__(self, other):
-        return self.time <= other.time
-
-
+@dataclass
 class Entry(object):
-    def __init__(self, entry_id, billable, spent, note=''):
-        self.id = entry_id
-        self.billable = billable
-        self.spent = spent
-        self.note = note
+    id: int
+    billable: bool
+    spent: Time
+    note: str = ''
 
 
 class TicketingSystem(object):
@@ -98,20 +89,20 @@ class TicketingSystem(object):
             s = requests.Session()
             s.mount('https://', HTTPAdapter(max_retries=self.max_retries))
             ans = s.get(self.api_url, params=self.params, auth=self.auth, timeout=self.timeout)
-        except requests.ConnectTimeout:
+        except urllib3.exceptions.ConnectTimeoutError:
             print('Connection timeout...')
-            raise
+            return None
         return ans.json()
 
     def parse_json(self):
         raise (Exception, 'Not implemented')
 
     def get_billable(self):
-        time = Time(sum(i.spent for i in self.entries if i.billable))
+        time = Time(sum(i.spent.time for i in self.entries if i.billable))
         return time
 
     def get_notbillable(self):
-        time = Time(sum(i.spent for i in self.entries if not i.billable))
+        time = Time(sum(i.spent.time for i in self.entries if not i.billable))
         return time
 
     def get_total(self):
@@ -134,7 +125,7 @@ class TicketingSystem(object):
         for entry in self.entries:
             res.append(
                 f'''{self.entry_url}{entry.id}'''
-                f'''\n\t{'Billable' if entry.billable else 'Not billable'}: {entry.spent} {entry.note}''')
+                f'''\n\t{'Bill' if entry.billable else 'Free'}: {entry.spent} {entry.note}''')
         return '\n'.join(res)
 
 
@@ -149,12 +140,13 @@ class Freshesk(TicketingSystem):
         self.url = self.config.get('freshdesk', 'url')
         self.api_url = self.url + '/api/v2/time_entries'
         self.entry_url = self.url + '/a/tickets/'
-        self.entries = [Entry(entry_id=i.get('ticket_id'),
+        self.json = self.get_json()
+        self.data = sorted(self.json, key=lambda k: (k.get('ticket_id'), k.get('updated_at'))) if self.json else []
+        self.entries = [Entry(id=i.get('ticket_id'),
                               billable=i.get('billable'),
-                              spent=Time(i.get('time_spent')),
+                              spent=Time.from_string(i.get('time_spent')),
                               note=i.get('note'))
-                        for i in sorted(self.get_json(),
-                                        key=lambda k: (k.get('ticket_id'), k.get('updated_at')))]
+                        for i in self.data]
 
 
 class TeamWork(TicketingSystem):
@@ -168,11 +160,13 @@ class TeamWork(TicketingSystem):
             'fromdate': self.report_date.strftime('%Y%m%d'),
             'todate': self.report_date.strftime('%Y%m%d')
         }
-        self.entries = [Entry(entry_id=i.get('todo-item-id'),
-                              spent=(i.get('hours'), i.get('minutes')),
+        self.json = self.get_json()
+        self.data = sorted(self.get_json().get('time-entries')) if self.json else []
+        self.entries = [Entry(id=i.get('todo-item-id'),
+                              spent=(i.get('hours') * 3600 + i.get('minutes') * 60),
                               billable=(i.get('isbillable') == 1),
                               note=i.get('project-name'))
-                        for i in sorted(self.get_json().get('time-entries'))]
+                        for i in self.data]
 
 
 class Jira(TicketingSystem):
@@ -200,7 +194,7 @@ class Jira(TicketingSystem):
                 if (worklog['author']['name'] == jira_login and
                         worklog['started'].split('T')[0] == report_date.strftime('%Y-%m-%d')):
                     time_spent = int(worklog.get('timeSpentSeconds'))
-                    entries.append(Entry(entry_id=issue.get('key'),
+                    entries.append(Entry(id=issue.get('key'),
                                          billable=False,
                                          spent=Time(time_spent),
                                          note=worklog.get('comment')))
@@ -208,8 +202,8 @@ class Jira(TicketingSystem):
 
 
 parser = argparse.ArgumentParser(description='Simple time tracker for Freshdesk')
-parser.add_argument('config_path', action='store', type=str, nargs='?', help='Path to config')
 parser.add_argument('offset', action='store', type=int, nargs='?', help='Offset in days from today')
+parser.add_argument('config_path', action='store', type=str, nargs='?', help='Path to config')
 parser.set_defaults(offset=0, config_path='./config.ini')
 
 args = parser.parse_args()
@@ -229,15 +223,16 @@ print(ji)
 tw = TeamWork(config, report_date, offset)
 print(tw)
 
-workday_begin = Time(config.get('global', 'workday_begin'))
-workday_end = Time(config.get('global', 'workday_end'))
-launch_begin = Time(config.get('global', 'launch_begin'))
-launch_end = Time(config.get('global', 'launch_end'))
+workday_begin = Time.from_string(config.get('global', 'workday_begin'))
+workday_end = Time.from_string(config.get('global', 'workday_end'))
+launch_begin = Time.from_string(config.get('global', 'launch_begin'))
+launch_end = Time.from_string(config.get('global', 'launch_end'))
 
 launch_duration = launch_end - launch_begin
 workday_duration = workday_end - workday_begin - launch_duration
 
-time_now = Time((datetime.now().hour, datetime.now().minute))
+time_now = Time.from_string(datetime.now().strftime('%H:%M'))
+
 total_tracked_time = sum((fd.get_total(), tw.get_total(), ji.get_total()))
 if args.offset == 0 and workday_begin <= time_now <= workday_end:
     total_time = time_now - workday_begin
@@ -249,9 +244,9 @@ if args.offset == 0 and workday_begin <= time_now <= workday_end:
     untracked_time = total_time - total_tracked_time
 else:
     untracked_time = workday_duration - total_tracked_time
-#
+
 print(f'''
-Total tracked time:    {sum((fd.get_total(), tw.get_total(), ji.get_total()))}
+Total tracked time:    {total_tracked_time}
 - Freshdesk billable:  {fd.get_billable()}
 - Freshdesk free:      {fd.get_notbillable()}
 - Teamwork billable:   {tw.get_billable()}
