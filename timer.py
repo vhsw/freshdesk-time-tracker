@@ -14,45 +14,45 @@ from requests.auth import HTTPBasicAuth
 
 @dataclass(order=True)
 class Time(object):
-    time: float = field(compare=True, default=0.0)
+    seconds: float = field(compare=True, default=0.0)
 
     @classmethod
     def from_string(cls, string):
         seconds = float(string[:2]) * 3600.0 + float(string[3:]) * 60.0
-        return cls(seconds)
+        return Time(seconds)
 
     @classmethod
     def from_params(cls, hours=0, minutes=0, seconds=0):
         seconds = hours * 3600 + minutes * 60 + seconds
-        return cls(seconds)
+        return Time(seconds)
 
     def __format__(self, t_format=None):
         if not t_format:
             t_format = '''{sign}{day}{hour:02}:{minute:02}'''
-        negative = self.time < 0
-        total_seconds = round(abs(self.time))
+        negative = self.seconds < 0
+        total_seconds = round(abs(self.seconds))
 
-        msec = 60
-        hsec = 60 * msec
-        dsec = 24 * hsec
+        m_sec = 60
+        h_sec = 60 * m_sec
+        d_sec = 24 * h_sec
 
-        day = total_seconds // dsec
-        total_seconds -= day * dsec
+        day = total_seconds // d_sec
+        total_seconds -= day * d_sec
 
-        hour = total_seconds // hsec
-        total_seconds -= hour * hsec
+        hour = total_seconds // h_sec
+        total_seconds -= hour * h_sec
 
-        minute = total_seconds // msec
-        total_seconds -= minute * msec
+        minute = total_seconds // m_sec
+        total_seconds -= minute * m_sec
 
         second = total_seconds
 
-        repr = t_format.format(sign='-' if negative else '',
-                               day=f'{day} day ' if day > 0 else '',
-                               hour=hour,
-                               minute=minute,
-                               second=second)
-        return repr
+        repr_str = t_format.format(sign='-' if negative else '',
+                                   day=f'{day} day ' if day > 0 else '',
+                                   hour=hour,
+                                   minute=minute,
+                                   second=second)
+        return repr_str
 
     def __repr__(self):
         return self.__format__('''{sign}{day}{hour:02}:{minute:02}''')
@@ -60,7 +60,7 @@ class Time(object):
     def __add__(self, other):
         if other == 0:
             return self
-        return Time(self.time + other.time)
+        return Time(self.seconds + other.seconds)
 
     def __radd__(self, other):
         if type(other) is int:
@@ -69,7 +69,18 @@ class Time(object):
             return self.__add__(other)
 
     def __sub__(self, other):
-        return self.__add__(Time(-other.time))
+        return self.__add__(Time(-other.seconds))
+
+
+class TerminalColor:
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    GREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    END = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
 
 
 @dataclass
@@ -80,7 +91,43 @@ class Entry(object):
     note: str = ''
 
 
+@dataclass
 class TicketingSystem(object):
+    config: configparser.RawConfigParser
+    report_date: datetime
+    auth: tuple = field(init=False)
+    params: dict = field(init=False)
+    url: str = field(init=False)
+    api_url: str = field(init=False)
+    entries: list = field(init=False)
+    entry_url: str = field(init=False)
+    max_retries: int = field(init=False, default=5)
+    timeout: int = field(init=False, default=5)
+
+    # def __init__(self, config, report_date):
+    #     self.config = config
+    #     self.report_date = report_date
+    #     self.auth = None
+    #     self.params = None
+    #     self.url = None
+    #     self.api_url = None
+    #     self.max_retries = 5
+    #     self.timeout = 3
+    #     self.entries = []
+    #     self.entry_url = None
+
+    def __repr__(self):
+        res = []
+
+        if not self.entries:
+            return ''
+
+        for entry in self.entries:
+            res.append(
+                f'''{self.entry_url}{entry.id}'''
+                f'''\n\t{'Bill' if entry.billable else 'Free'}: {entry.spent} {entry.note}''')
+        return '\n'.join(res)
+
     def prepare_url(self):
         raise (Exception, 'Not implemented')
 
@@ -97,36 +144,16 @@ class TicketingSystem(object):
     def parse_json(self):
         raise (Exception, 'Not implemented')
 
-    def get_billable(self):
-        time = Time(sum(i.spent.time for i in self.entries if i.billable))
+    def get_bill(self):
+        time = Time(sum(i.spent.seconds for i in self.entries if i.billable))
         return time
 
-    def get_notbillable(self):
-        time = Time(sum(i.spent.time for i in self.entries if not i.billable))
+    def get_free(self):
+        time = Time(sum(i.spent.seconds for i in self.entries if not i.billable))
         return time
 
     def get_total(self):
-        return self.get_billable() + self.get_notbillable()
-
-    def __init__(self, config, report_date):
-        self.config = config
-        self.report_date = report_date
-        self.auth = None
-        self.params = None
-        self.url = None
-        self.api_url = None
-        self.max_retries = 5
-        self.timeout = 3
-        self.entries = []
-        self.entry_url = None
-
-    def __repr__(self):
-        res = []
-        for entry in self.entries:
-            res.append(
-                f'''{self.entry_url}{entry.id}'''
-                f'''\n\t{'Bill' if entry.billable else 'Free'}: {entry.spent} {entry.note}''')
-        return '\n'.join(res)
+        return self.get_bill() + self.get_free()
 
 
 class Freshesk(TicketingSystem):
@@ -213,14 +240,20 @@ config.read(args.config_path)
 offset = args.offset
 report_date = datetime.combine(date.today(), datetime.min.time()) - td(days=offset)
 
-print(report_date.strftime('%d %b %Y'))
-print()
+print(f'''Time records for {report_date.strftime('%d %b %Y')}\n''')
 
-fd = Freshesk(config, report_date, offset)
+params = (config, report_date, offset)
+
+print('\rGetting Freshesk...', end='')
+fd = Freshesk(*params)
+print('\rGetting Jira...    ', end='')
+ji = Jira(*params)
+print('\rGetting TeamWork...', end='')
+tw = TeamWork(*params)
+print('\r                   ', end='\r')
+
 print(fd)
-ji = Jira(config, report_date, offset)
 print(ji)
-tw = TeamWork(config, report_date, offset)
 print(tw)
 
 workday_begin = Time.from_string(config.get('global', 'workday_begin'))
@@ -233,7 +266,10 @@ workday_duration = workday_end - workday_begin - launch_duration
 
 time_now = Time.from_string(datetime.now().strftime('%H:%M'))
 
-total_tracked_time = sum((fd.get_total(), tw.get_total(), ji.get_total()))
+total_bill_time = sum((fd.get_bill(), tw.get_bill(), ji.get_bill()))
+total_free_time = sum((fd.get_free(), tw.get_free(), ji.get_free()))
+total_tracked_time = total_bill_time + total_free_time
+
 if args.offset == 0 and workday_begin <= time_now <= workday_end:
     total_time = time_now - workday_begin
     if launch_begin <= time_now <= launch_end:
@@ -245,13 +281,25 @@ if args.offset == 0 and workday_begin <= time_now <= workday_end:
 else:
     untracked_time = workday_duration - total_tracked_time
 
+terminal_width = 60
+try:
+    bill_part = int(total_bill_time.seconds / total_tracked_time.seconds * terminal_width)
+    free_part = int(total_free_time.seconds / total_tracked_time.seconds * terminal_width)
+except ZeroDivisionError:
+    bill_part = 0
+    free_part = terminal_width
+
 print(f'''
+
 Total tracked time:    {total_tracked_time}
-- Freshdesk billable:  {fd.get_billable()}
-- Freshdesk free:      {fd.get_notbillable()}
-- Teamwork billable:   {tw.get_billable()}
-- Teamwork free:       {tw.get_notbillable()}
-- Jira:                {ji.get_notbillable()}
+- Freshdesk billable:  {fd.get_bill()}
+- Freshdesk free:      {fd.get_free()}
+- Teamwork billable:   {tw.get_bill()}
+- Teamwork free:       {tw.get_free()}
+- Jira:                {ji.get_free()}
+
+Bill to free ratio:
+[{TerminalColor.GREEN + ('#' * bill_part) + TerminalColor.END + (' ' * free_part)}]
 
 Untracked time{' by now' if offset == 0 else ''}: {untracked_time}
 ''')
