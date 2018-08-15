@@ -1,10 +1,11 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.7
 # -*- coding: utf-8 -*-
 import argparse
 import configparser
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import datetime, date, timedelta as td
+from typing import List, Tuple, Dict
 
 import requests
 import urllib3
@@ -72,15 +73,16 @@ class Time(object):
         return self.__add__(Time(-other.seconds))
 
 
-class TerminalColor:
-    HEADER = '\033[95m'
-    BLUE = '\033[94m'
+class TermColor:
+    RED = '\033[91m'
+    YELLOW = '\033[93m'
     GREEN = '\033[92m'
-    WARNING = '\033[93m'
-    FAIL = '\033[91m'
-    END = '\033[0m'
+    BLUE = '\033[94m'
+    PURPLE = '\033[95m'
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
+    END = '\033[0m'
+    NORM = END
 
 
 @dataclass
@@ -92,54 +94,38 @@ class Entry(object):
 
 
 @dataclass
-class TicketingSystem(object):
+class TicketingSystem:
     config: configparser.RawConfigParser
     report_date: datetime
-    auth: tuple = field(init=False)
-    params: dict = field(init=False)
+    offset: int
+    auth: Tuple[str] = field(init=False)
+    params: Dict[str, str] = field(init=False)
     url: str = field(init=False)
     api_url: str = field(init=False)
-    entries: list = field(init=False)
+    entries: List[Entry] = field(init=False)
     entry_url: str = field(init=False)
     max_retries: int = field(init=False, default=5)
     timeout: int = field(init=False, default=5)
 
-    # def __init__(self, config, report_date):
-    #     self.config = config
-    #     self.report_date = report_date
-    #     self.auth = None
-    #     self.params = None
-    #     self.url = None
-    #     self.api_url = None
-    #     self.max_retries = 5
-    #     self.timeout = 3
-    #     self.entries = []
-    #     self.entry_url = None
-
-    def __repr__(self):
+    def __str__(self):
         res = []
-
-        if not self.entries:
-            return ''
-
         for entry in self.entries:
             res.append(
                 f'''{self.entry_url}{entry.id}'''
                 f'''\n\t{'Bill' if entry.billable else 'Free'}: {entry.spent} {entry.note}''')
         return '\n'.join(res)
 
-    def prepare_url(self):
-        raise (Exception, 'Not implemented')
+    def __repr__(self):
+        return __name__ + self.__str__()
 
     def get_json(self):
         try:
             s = requests.Session()
             s.mount('https://', HTTPAdapter(max_retries=self.max_retries))
             ans = s.get(self.api_url, params=self.params, auth=self.auth, timeout=self.timeout)
+            return ans.json()
         except urllib3.exceptions.ConnectTimeoutError:
             print('Connection timeout...')
-            return None
-        return ans.json()
 
     def parse_json(self):
         raise (Exception, 'Not implemented')
@@ -156,9 +142,9 @@ class TicketingSystem(object):
         return self.get_bill() + self.get_free()
 
 
+@dataclass
 class Freshesk(TicketingSystem):
-    def __init__(self, config, report_date, offset):
-        TicketingSystem.__init__(self, config, report_date)
+    def __post_init__(self):
         self.report_date -= td(hours=self.config.getint('freshdesk', 'tz_shift')) + td(seconds=1)
         self.auth = (self.config.get('freshdesk', 'api_key'), 'X')
         self.params = {'agent_id': self.config.get('freshdesk', 'agent_id'),
@@ -176,13 +162,14 @@ class Freshesk(TicketingSystem):
                         for i in self.data]
 
 
+@dataclass
 class TeamWork(TicketingSystem):
-    def __init__(self, config_path, report_date, offset):
-        TicketingSystem.__init__(self, config_path, report_date)
+    def __post_init__(self):
         self.auth = HTTPBasicAuth(self.config.get('teamwork', 'api_key'), 'X')
         self.url = self.config.get('teamwork', 'url')
         self.api_url = self.url + '/time_entries.json'
-        self.params = params = {
+        self.entry_url = self.url + '/#tasks/'
+        self.params = {
             'userId': self.config.get('teamwork', 'agent_id'),
             'fromdate': self.report_date.strftime('%Y%m%d'),
             'todate': self.report_date.strftime('%Y%m%d')
@@ -190,28 +177,29 @@ class TeamWork(TicketingSystem):
         self.json = self.get_json()
         self.data = sorted(self.get_json().get('time-entries')) if self.json else []
         self.entries = [Entry(id=i.get('todo-item-id'),
-                              spent=(i.get('hours') * 3600 + i.get('minutes') * 60),
+                              spent=(Time(int(i.get('hours')) * 3600 + int(i.get('minutes')) * 60)),
                               billable=(i.get('isbillable') == 1),
                               note=i.get('project-name'))
                         for i in self.data]
 
 
+@dataclass
 class Jira(TicketingSystem):
-    def __init__(self, config_path, report_date, offset):
-        TicketingSystem.__init__(self, config_path, report_date)
+    def __post_init__(self):
         jira_login = self.config.get('jira', 'login')
         jira_pass = self.config.get('jira', 'password')
         self.auth = HTTPBasicAuth(jira_login, jira_pass)
         self.url = self.config.get('jira', 'url')
         self.api_url = self.url + '/rest/api/2/search'
         self.entry_url = self.url + '/browse/'
-        json = requests.post(self.api_url,
-                             headers={"Content-Type": "application/json"},
-                             json={
-                                 'jql': f'''worklogAuthor = {jira_login} AND worklogDate = {self.report_date.strftime('%Y-%m-%d')}''',
-                                 "fields": ["key"],
-                                 "maxResults": 1000},
-                             auth=HTTPBasicAuth(jira_login, jira_pass)).json()
+        json = requests.post(
+            self.api_url,
+            headers={'Content-Type': 'application/json'},
+            json={
+                'jql': f'''worklogAuthor = {jira_login} AND worklogDate = {self.report_date.strftime('%Y-%m-%d')}''',
+                'fields': ['key'],
+                'maxResults': 1000},
+            auth=HTTPBasicAuth(jira_login, jira_pass)).json()
         entries = []
         for issue in json['issues']:
             ans = requests.get(f'{self.url}/rest/api/2/issue/' +
@@ -240,7 +228,9 @@ config.read(args.config_path)
 offset = args.offset
 report_date = datetime.combine(date.today(), datetime.min.time()) - td(days=offset)
 
-print(f'''Time records for {report_date.strftime('%d %b %Y')}\n''')
+date_color = TermColor.RED if report_date.weekday() in (5, 6) else TermColor.END
+
+print(f'''Time records for {report_date.strftime(f'{date_color}%a %d %b %Y{TermColor.END}')}\n''')
 
 params = (config, report_date, offset)
 
@@ -252,9 +242,15 @@ print('\rGetting TeamWork...', end='')
 tw = TeamWork(*params)
 print('\r                   ', end='\r')
 
-print(fd)
-print(ji)
-print(tw)
+
+def print_if_not_empty(ts: TicketingSystem):
+    if ts.entries:
+        print(ts)
+
+
+print_if_not_empty(fd)
+print_if_not_empty(ji)
+print_if_not_empty(tw)
 
 workday_begin = Time.from_string(config.get('global', 'workday_begin'))
 workday_end = Time.from_string(config.get('global', 'workday_end'))
@@ -282,12 +278,9 @@ else:
     untracked_time = workday_duration - total_tracked_time
 
 terminal_width = 60
-try:
-    bill_part = int(total_bill_time.seconds / total_tracked_time.seconds * terminal_width)
-    free_part = int(total_free_time.seconds / total_tracked_time.seconds * terminal_width)
-except ZeroDivisionError:
-    bill_part = 0
-    free_part = terminal_width
+bill_part = int(total_bill_time.seconds / workday_duration.seconds * terminal_width)
+free_part = int(total_free_time.seconds / workday_duration.seconds * terminal_width)
+none_part = int(untracked_time.seconds / workday_duration.seconds * terminal_width)
 
 print(f'''
 
@@ -299,7 +292,10 @@ Total tracked time:    {total_tracked_time}
 - Jira:                {ji.get_free()}
 
 Bill to free ratio:
-[{TerminalColor.GREEN + ('#' * bill_part) + TerminalColor.END + (' ' * free_part)}]
+[{TermColor.GREEN + ('#' * bill_part) +
+  TermColor.NORM + ('#' * free_part) +
+  TermColor.RED + ('#' * none_part) +
+  TermColor.END}]
 
 Untracked time{' by now' if offset == 0 else ''}: {untracked_time}
 ''')
