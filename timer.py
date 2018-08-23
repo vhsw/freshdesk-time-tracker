@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 import argparse
 import configparser
+import os
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import datetime, date, timedelta as td
@@ -96,8 +97,8 @@ class Entry(object):
 @dataclass
 class TicketingSystem:
     config: configparser.RawConfigParser
-    report_date: datetime
-    offset: int
+    report_date: datetime = datetime.min
+    offset: int = 0
     auth: Tuple[str] = field(init=False)
     params: Dict[str, str] = field(init=False)
     url: str = field(init=False)
@@ -119,13 +120,19 @@ class TicketingSystem:
         return __name__ + self.__str__()
 
     def get_json(self):
+        json = {}
         try:
             s = requests.Session()
             s.mount('https://', HTTPAdapter(max_retries=self.max_retries))
             ans = s.get(self.api_url, params=self.params, auth=self.auth, timeout=self.timeout)
-            return ans.json()
+            if ans.status_code != 200:
+                raise urllib3.exceptions.ResponseError(ans.status_code, self.api_url)
+            json = ans.json()
         except urllib3.exceptions.ConnectTimeoutError:
             print('Connection timeout...')
+        except urllib3.exceptions.ResponseError as e:
+            print(f'Warning! Got response code {e.args[0]} on {e.args[1]}')
+        return json
 
     def parse_json(self):
         raise (Exception, 'Not implemented')
@@ -217,19 +224,38 @@ class Jira(TicketingSystem):
 
 
 parser = argparse.ArgumentParser(description='Simple time tracker for Freshdesk')
-parser.add_argument('offset', action='store', type=int, nargs='?', help='Offset in days from today')
-parser.add_argument('config_path', action='store', type=str, nargs='?', help='Path to config')
-parser.set_defaults(offset=0, config_path='./config.ini')
+parser.add_argument('offset', default=0, type=int, nargs='?', help='Offset in days from today')
+parser.add_argument('-c', '--config', default='~/config.ini', type=str, nargs='?', help='Path to config')
+parser.add_argument('-t', '--ticket', type=int, nargs='?',
+                    help='Freshdesk ticker #. If provided, return spent time for ticket')
 
 args = parser.parse_args()
-
 config = configparser.RawConfigParser()
-config.read(args.config_path)
+config.read(os.path.expanduser(args.config))
+
+# Time records for one ticker
+if args.ticket:
+    ts = TicketingSystem(config)
+    ts.api_url = f'''{config.get('freshdesk', 'url')}/api/v2/tickets/{args.ticket}/time_entries'''
+    ts.auth = config.get('freshdesk', 'api_key'), 'X'
+    ts.params = None
+    ts.data = ts.get_json()
+    ts.entries = [Entry(id=i.get('ticket_id'),
+                        billable=i.get('billable'),
+                        spent=Time.from_string(i.get('time_spent')),
+                        note=i.get('note'))
+                  for i in ts.data]
+
+    print(f'''Time records for ticket #{args.ticket}:
+Total: {ts.get_total()}
+Bill:  {ts.get_bill()}
+Free:  {ts.get_free()}
+''')
+    exit(0)
+
 offset = args.offset
 report_date = datetime.combine(date.today(), datetime.min.time()) - td(days=offset)
-
 date_color = TermColor.RED if report_date.weekday() in (5, 6) else TermColor.END
-
 print(f'''Time records for {report_date.strftime(f'{date_color}%a %d %b %Y{TermColor.END}')}\n''')
 
 params = (config, report_date, offset)
@@ -277,13 +303,32 @@ if args.offset == 0 and workday_begin <= time_now <= workday_end:
 else:
     untracked_time = workday_duration - total_tracked_time
 
-terminal_width = 60
-bill_part = int(total_bill_time.seconds / workday_duration.seconds * terminal_width)
-free_part = int(total_free_time.seconds / workday_duration.seconds * terminal_width)
-none_part = int(untracked_time.seconds / workday_duration.seconds * terminal_width)
+# Ceil to 5 minutes
+untracked_time.seconds = (untracked_time.seconds // 300) * 300 + 300
+
+
+def bill_to_free_ratio(bill_time=Time(0), free_time=Time(0), untracked=Time(0),
+                       workday_duration=Time.from_params(hours=8), terminal_width=80):
+    total = bill_time.seconds + free_time.seconds + untracked_time.seconds
+    rest_time = Time(workday_duration.seconds - total)
+    if rest_time.seconds < 0:
+        rest_time = Time(0)
+    else:
+        total = workday_duration.seconds
+
+    bill_part = int(bill_time.seconds / total * terminal_width)
+    free_part = int(free_time.seconds / total * terminal_width)
+    none_part = int(untracked.seconds / total * terminal_width)
+    rest_part = int(rest_time.seconds / total * terminal_width)
+    return f'''Bill to free ratio:
+[{TermColor.GREEN + ('#' * bill_part) +
+  TermColor.NORM +  ('#' * free_part) +
+  TermColor.RED +   ('#' * none_part) +
+  TermColor.NORM +  (' ' * rest_part)}]
+'''
+
 
 print(f'''
-
 Total tracked time:    {total_tracked_time}
 - Freshdesk billable:  {fd.get_bill()}
 - Freshdesk free:      {fd.get_free()}
@@ -291,11 +336,9 @@ Total tracked time:    {total_tracked_time}
 - Teamwork free:       {tw.get_free()}
 - Jira:                {ji.get_free()}
 
-Bill to free ratio:
-[{TermColor.GREEN + ('#' * bill_part) +
-  TermColor.NORM + ('#' * free_part) +
-  TermColor.RED + ('#' * none_part) +
-  TermColor.END}]
-
+{bill_to_free_ratio(total_bill_time,
+                    total_free_time,
+                    untracked_time,
+                    workday_duration)}
 Untracked time{' by now' if offset == 0 else ''}: {untracked_time}
 ''')
