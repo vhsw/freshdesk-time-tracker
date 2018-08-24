@@ -1,11 +1,12 @@
 #!/usr/bin/env python3.7
 # -*- coding: utf-8 -*-
 import argparse
+# import aiohttp
+import asyncio
 import configparser
 import os
-from dataclasses import dataclass
-from dataclasses import field
-from datetime import datetime, date, timedelta as td
+from dataclasses import dataclass, field
+from datetime import datetime, date, timedelta
 from typing import List, Tuple, Dict
 
 import requests
@@ -152,11 +153,11 @@ class TicketingSystem:
 @dataclass
 class Freshesk(TicketingSystem):
     def __post_init__(self):
-        self.report_date -= td(hours=self.config.getint('freshdesk', 'tz_shift')) + td(seconds=1)
+        self.report_date -= timedelta(hours=self.config.getint('freshdesk', 'tz_shift')) + timedelta(seconds=1)
         self.auth = (self.config.get('freshdesk', 'api_key'), 'X')
         self.params = {'agent_id': self.config.get('freshdesk', 'agent_id'),
                        'executed_after': self.report_date.strftime('%Y-%m-%dT%H:%M:%SZ'),
-                       'executed_before': (self.report_date + td(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ')}
+                       'executed_before': (self.report_date + timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ')}
         self.url = self.config.get('freshdesk', 'url')
         self.api_url = self.url + '/api/v2/time_entries'
         self.entry_url = self.url + '/a/tickets/'
@@ -254,7 +255,7 @@ Free:  {ts.get_free()}
     exit(0)
 
 offset = args.offset
-report_date = datetime.combine(date.today(), datetime.min.time()) - td(days=offset)
+report_date = datetime.combine(date.today(), datetime.min.time()) - timedelta(days=offset)
 date_color = TermColor.RED if report_date.weekday() in (5, 6) else TermColor.END
 print(f'''Time records for {report_date.strftime(f'{date_color}%a %d %b %Y{TermColor.END}')}\n''')
 
@@ -304,7 +305,7 @@ else:
     untracked_time = workday_duration - total_tracked_time
 
 # Ceil to 5 minutes
-untracked_time.seconds = (untracked_time.seconds // 300) * 300 + 300
+untracked_time.seconds = untracked_time.seconds if untracked_time.seconds % 300 == 0 else untracked_time.seconds // 300 * 300 + 300
 
 
 def bill_to_free_ratio(bill_time=Time(0), free_time=Time(0), untracked=Time(0),
