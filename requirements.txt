@@ -1,6 +1,0 @@
-argparse
-configparser
-datetime
-requests
-idna
-urllib3
