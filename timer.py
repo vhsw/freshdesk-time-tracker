@@ -340,7 +340,7 @@ def bill_to_free_ratio(bill_time=Time(0), free_time=Time(0), untracked=Time(0),
 [{(TermColor.GREEN * (bill_part>0)) + ('#' * bill_part) +
   (TermColor.NORM  * (free_part>0)) + ('#' * free_part) +
   (TermColor.RED   * (none_part>0)) + ('#' * none_part) +
-  (TermColor.NORM  * (rest_part>0)) + ('_' * rest_part)}]
+  TermColor.NORM  + ('_' * rest_part)}]
 '''
 
 
