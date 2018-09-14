@@ -96,13 +96,13 @@ class TicketingSystem:
     config: configparser.RawConfigParser
     report_date: datetime = datetime.min
     offset: int = 0
+    json: Dict = None
+    entries: List[Entry] = field(default_factory=list)
     auth: Tuple[str] = field(init=False)
     params: Dict[str, str] = field(init=False)
     url: str = field(init=False)
     api_url: str = field(init=False)
     entry_url: str = field(init=False)
-    json: Dict = field(init=False)
-    entries: List = field(init=False)
     max_retries: int = field(init=False, default=5)
     timeout: int = field(init=False, default=5)
 
@@ -119,11 +119,11 @@ class TicketingSystem:
 
     async def get_json(self):
         async with aiohttp.ClientSession() as session:
-            async with session.get(self.api_url, params=self.params, timeout=self.timeout, auth=self.auth) as resp:
-                self.json = await resp.json()
-
-    def get_entries(self):
-        raise Exception('Not implemented')
+            try:
+                async with session.get(self.api_url, params=self.params, timeout=self.timeout, auth=self.auth) as resp:
+                    self.json = await resp.json()
+            except asyncio.TimeoutError:
+                print(f'Got timeout while getting {self.__class__.__name__}')
 
     def get_bill(self):
         time = Time(sum(i.spent.seconds for i in self.entries if i.billable))
@@ -194,31 +194,35 @@ class Jira(TicketingSystem):
             'maxResults': 1000,
             'fields': 'id'}
 
-        self.entries = []
-
     # FIXME
     def get_entries(self):
         async def get_issue(url, issue_id):
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=self.timeout, auth=self.auth) as resp:
-                    result = await resp.json()
-                    for worklog in result['worklogs']:
-                        if (worklog['author']['name'] == self.config.get('jira', 'login') and
-                                worklog['started'].split('T')[0] == report_date.strftime('%Y-%m-%d')):
-                            time_spent = int(worklog.get('timeSpentSeconds'))
-                            self.entries.append(Entry(id=issue_id,
-                                                      billable=False,
-                                                      spent=Time(time_spent),
-                                                      note=worklog.get('comment')))
+                try:
+                    async with session.get(url, timeout=self.timeout, auth=self.auth, compress=True) as resp:
+                        result = await resp.json()
+                        for worklog in result['worklogs']:
+                            if (worklog['author']['name'] == self.config.get('jira', 'login') and
+                                    worklog['started'].split('T')[0] == report_date.strftime('%Y-%m-%d')):
+                                time_spent = int(worklog.get('timeSpentSeconds'))
+                                self.entries.append(Entry(id=issue_id,
+                                                          billable=False,
+                                                          spent=Time(time_spent),
+                                                          note=worklog.get('comment')))
+                except asyncio.TimeoutError:
+                    print(f'Got timeout while getting {url}')
 
         loop = asyncio.get_event_loop()
-        tasks = [get_issue(issue['self'] + '/worklog', issue.get('key')) for issue in self.json['issues']]
+        if self.json:
+            tasks = [get_issue(issue.get('self') + '/worklog', issue.get('key')) for issue in self.json.get('issues')]
+        else:
+            tasks = []
         loop.run_until_complete(asyncio.gather(*tasks))
         loop.close()
 
 
 parser = argparse.ArgumentParser(description='Simple time tracker for Freshdesk')
-parser.add_argument('offset', default=0, type=int, nargs='?', help='Offset in days from today')
+parser.add_argument('offset', default=0, type=str, nargs='?', help='Offset in days from today')
 parser.add_argument('-c', '--config', default='~/config.ini', type=str, nargs='?', help='Path to config')
 parser.add_argument('-t', '--ticket', type=int, nargs='?',
                     help='Freshdesk ticker #. If provided, return spent time for ticket')
@@ -255,14 +259,32 @@ Free:  {ts.get_free()}
 ''')
     exit(0)
 
-offset = args.offset
-report_date = datetime.combine(date.today(), datetime.min.time()) - timedelta(days=offset)
+
+def multi_split(string):
+    buff = ''
+    res = []
+    for l in string:
+        if l in '.- /\\':
+            res.append(int(buff))
+            buff = ''
+        else:
+            buff += l
+    if buff:
+        res.append(int(buff))
+    return res[::-1]
+
+
+offset = multi_split(args.offset)
+if len(offset) == 1:
+    report_date = datetime.combine(date.today(), datetime.min.time()) - timedelta(days=offset[0])
+else:
+    report_date = datetime.combine(date(*offset), datetime.min.time())
+
 date_color = TermColor.RED if report_date.weekday() in (5, 6) else TermColor.END
 print(f'''Time records for {report_date.strftime(f'{date_color}%a %d %b %Y{TermColor.END}')}\n''')
 
 params = (config, report_date, offset)
 
-# print('\rGetting Freshesk...', end='')
 fd = Freshesk(*params)
 tw = TeamWork(*params)
 ji = Jira(*params)
