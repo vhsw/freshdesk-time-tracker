@@ -222,7 +222,7 @@ class Jira(TicketingSystem):
 
 
 parser = argparse.ArgumentParser(description='Simple time tracker for Freshdesk')
-parser.add_argument('offset', default=0, type=str, nargs='?', help='Offset in days from today')
+parser.add_argument('offset', default='0', type=str, nargs='?', help='Offset in days from today')
 parser.add_argument('-c', '--config', default='~/config.ini', type=str, nargs='?', help='Path to config')
 parser.add_argument('-t', '--ticket', type=int, nargs='?',
                     help='Freshdesk ticker #. If provided, return spent time for ticket')
