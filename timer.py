@@ -53,6 +53,12 @@ class Time(object):
                                    second=second)
         return repr_str
 
+    def ceil(self, seconds):
+        if self.seconds % seconds != 0:
+            self.seconds = self.seconds // seconds * seconds
+            self.seconds += seconds
+        return self
+
     def __repr__(self):
         return self.__format__('''{sign}{day}{hour:02}:{minute:02}''')
 
@@ -222,16 +228,17 @@ class Jira(TicketingSystem):
 
 
 parser = argparse.ArgumentParser(description='Simple time tracker for Freshdesk')
-parser.add_argument('offset', default='0', type=str, nargs='?', help='Offset in days from today')
+parser.add_argument('offset', default='0', type=str, nargs='?',
+                    help='Offset in days from today or date in format dd-mm-yyyy')
 parser.add_argument('-c', '--config', default='~/config.ini', type=str, nargs='?', help='Path to config')
 parser.add_argument('-t', '--ticket', type=int, nargs='?',
-                    help='Freshdesk ticker #. If provided, return spent time for ticket')
+                    help='Freshdesk ticker #. If provided, return spent time for the ticket')
 
 args = parser.parse_args()
 config = configparser.RawConfigParser()
 config.read(os.path.expanduser(args.config))
 
-# Time records for one ticker
+# FIXME Time records for one ticket
 if args.ticket:
     ts = TicketingSystem(config)
     ts.api_url = f'''{config.get('freshdesk', 'url')}/api/v2/tickets/{args.ticket}/time_entries'''
@@ -263,8 +270,9 @@ Free:  {ts.get_free()}
 def multi_split(string):
     buff = ''
     res = []
+    delimiters = tuple(s for s in string if not s.isdigit())
     for l in string:
-        if l in '.- /\\':
+        if l in delimiters:
             res.append(int(buff))
             buff = ''
         else:
@@ -280,6 +288,7 @@ if len(offset) == 1:
 else:
     report_date = datetime.combine(date(*offset), datetime.min.time())
 
+# Highlight date if report date if weekend
 date_color = TermColor.RED if report_date.weekday() in (5, 6) else TermColor.END
 print(f'''Time records for {report_date.strftime(f'{date_color}%a %d %b %Y{TermColor.END}')}\n''')
 
@@ -330,7 +339,9 @@ total_bill_time = sum((fd.get_bill(), tw.get_bill(), ji.get_bill()))
 total_free_time = sum((fd.get_free(), tw.get_free(), ji.get_free()))
 total_tracked_time = total_bill_time + total_free_time
 
-if args.offset == 0 and workday_begin <= time_now <= workday_end:
+report_is_now = report_date.date() == date.today() and workday_begin <= time_now <= workday_end
+
+if report_is_now:
     total_time = time_now - workday_begin
     if launch_begin <= time_now <= launch_end:
         total_time = launch_begin - workday_begin
@@ -342,7 +353,7 @@ else:
     untracked_time = workday_duration - total_tracked_time
 
 # Ceil to 5 minutes
-untracked_time.seconds = untracked_time.seconds if untracked_time.seconds % 300 == 0 else untracked_time.seconds // 300 * 300 + 300
+untracked_time.ceil(5 * 60)
 
 
 def bill_to_free_ratio(bill_time=Time(0), free_time=Time(0), untracked=Time(0),
@@ -367,16 +378,16 @@ def bill_to_free_ratio(bill_time=Time(0), free_time=Time(0), untracked=Time(0),
 
 
 print(f'''
-Total tracked time:    {total_tracked_time}
-- Freshdesk billable:  {fd.get_bill()}
-- Freshdesk free:      {fd.get_free()}
-- Teamwork billable:   {tw.get_bill()}
-- Teamwork free:       {tw.get_free()}
-- Jira:                {ji.get_free()}
+Total tracked time: {total_tracked_time}
+- Freshdesk bill:   {fd.get_bill()}
+- Freshdesk free:   {fd.get_free()}
+- Teamwork  bill:   {tw.get_bill()}
+- Teamwork  free:   {tw.get_free()}
+- Jira      free:   {ji.get_free()}
 
 {bill_to_free_ratio(total_bill_time,
                     total_free_time,
                     untracked_time,
                     workday_duration)}
-Untracked time{' by now' if offset == 0 else ''}: {untracked_time}
+Untracked time{' by now' if report_is_now else ''}: {untracked_time}
 ''')
