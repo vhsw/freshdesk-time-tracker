@@ -270,13 +270,12 @@ Free:  {ts.get_free()}
 def multi_split(string):
     buff = ''
     res = []
-    delimiters = tuple(s for s in string if not s.isdigit())
     for l in string:
-        if l in delimiters:
+        if l.isdigit():
+            buff += l
+        else:
             res.append(int(buff))
             buff = ''
-        else:
-            buff += l
     if buff:
         res.append(int(buff))
     return res[::-1]
