@@ -2,7 +2,7 @@
 Simple time tracker for Freshdesk, Jira and Teamwork.
 
 ## Installation
-Just place timer.py in any convenient place on your device. Also, you may want to add some alias in your bash or zsh profile.
+Just place timer.py in any convenient place on your device. Also, you may want to add alias in your bash or zsh profile.
 ```
 alias latime="~/timer.py"
 ```
@@ -57,12 +57,12 @@ Progress:
 Untracked time: 04:55
 ```
 
-To get time report for any other day run script with offset argument e.g. for yesterday it will be 
+To get time report for any other day you must specify offset argument e.g., for yesterday it will be 
 ```
 timer.py 1
 ```
 
-and for the day before yesterday
+and for the day before yesterday and so on
 ```
 timer.py 2
 ```
@@ -76,7 +76,7 @@ or
 timer.py 14-09-2018
 ```
 
-And you can get time report for single Freshdesk ticket using -t and ticket number:
+And you can get total spent time report for single Freshdesk ticket using -t and ticket number:
 ```
 timer.py -t 27974
 ```
