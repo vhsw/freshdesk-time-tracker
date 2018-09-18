@@ -101,7 +101,6 @@ class Entry(object):
 class TicketingSystem:
     config: configparser.RawConfigParser
     report_date: datetime = datetime.min
-    offset: int = 0
     json: Dict = None
     entries: List[Entry] = field(default_factory=list)
     auth: Tuple[str] = field(init=False)
@@ -266,32 +265,21 @@ Free:  {ts.get_free()}
 ''')
     exit(0)
 
-
-def multi_split(string):
-    buff = ''
-    res = []
-    for l in string:
-        if l.isdigit():
-            buff += l
-        else:
-            res.append(int(buff))
-            buff = ''
-    if buff:
-        res.append(int(buff))
-    return res[::-1]
-
-
-offset = multi_split(args.offset)
-if len(offset) == 1:
-    report_date = datetime.combine(date.today(), datetime.min.time()) - timedelta(days=offset[0])
+if args.offset.isdigit():
+    report_date = datetime.combine(date.today(), datetime.min.time()) - timedelta(days=int(args.offset))
 else:
-    report_date = datetime.combine(date(*offset), datetime.min.time())
+    try:
+        report_date = datetime.strptime(args.offset, config.get('global', 'date_format'))
+    except ValueError as e:
+        print(f'''{TermColor.RED}{args.offset} is neither an integer nor matches format {config.get('global', 'date_format')}.
+Try to run script with -h to get help{TermColor.END}''')
+        exit(1)
 
 # Highlight date if report date if weekend
 date_color = TermColor.RED if report_date.weekday() in (5, 6) else TermColor.END
 print(f'''Time records for {report_date.strftime(f'{date_color}%a %d %b %Y{TermColor.END}')}\n''')
 
-params = (config, report_date, offset)
+params = config, report_date
 
 fd = Freshesk(*params)
 tw = TeamWork(*params)
