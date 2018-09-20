@@ -100,7 +100,7 @@ class Entry(object):
 @dataclass
 class TicketingSystem:
     config: configparser.RawConfigParser
-    report_date: datetime = datetime.min
+    report_date: datetime = datetime.today()
     json: Dict = None
     entries: List[Entry] = field(default_factory=list)
     auth: Tuple[str] = field(init=False)
@@ -130,6 +130,9 @@ class TicketingSystem:
             except asyncio.TimeoutError:
                 print(f'Got timeout while getting {self.__class__.__name__}')
 
+    def get_entries(self):
+        raise NotImplementedError
+
     def get_bill(self):
         time = Time(sum(i.spent.seconds for i in self.entries if i.billable))
         return time
@@ -141,6 +144,9 @@ class TicketingSystem:
     def get_total(self):
         return self.get_bill() + self.get_free()
 
+    def print_if_not_empty(self):
+        if self.entries:
+            print(self)
 
 @dataclass
 class Freshesk(TicketingSystem):
@@ -161,6 +167,30 @@ class Freshesk(TicketingSystem):
                               spent=Time.from_string(i.get('time_spent')),
                               note=i.get('note'))
                         for i in data]
+
+    def get_ticket(self, ticket_num):
+        self.api_url = f'''{config.get('freshdesk', 'url')}/api/v2/tickets/{ticket_num}/time_entries'''
+        self.params = None
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(
+            asyncio.wait(
+                (
+                    self.get_json(),
+                )
+            )
+        )
+
+        self.entries = [Entry(id=i.get('ticket_id'),
+                              billable=i.get('billable'),
+                              spent=Time.from_string(i.get('time_spent')),
+                              note=i.get('note'))
+                        for i in self.json]
+
+        return (f'''Time records for ticket {ticket_num}:
+        Total: {self.get_total()}
+        Bill:  {self.get_bill()}
+        Free:  {self.get_free()}
+        ''')
 
 
 @dataclass
@@ -226,91 +256,53 @@ class Jira(TicketingSystem):
         loop.close()
 
 
-parser = argparse.ArgumentParser(description='Simple time tracker for Freshdesk')
+parser = argparse.ArgumentParser(description='Simple time tracker for Freshdesk, Jira and TeamWork')
 parser.add_argument('offset', default='0', type=str, nargs='?',
                     help='Offset in days from today or date in format dd-mm-yyyy')
 parser.add_argument('-c', '--config', default='~/config.ini', type=str, nargs='?', help='Path to config')
-parser.add_argument('-t', '--ticket', type=int, nargs='?',
-                    help='Freshdesk ticker #. If provided, return spent time for the ticket')
+parser.add_argument('-ft', '--ticket', type=int, nargs='?',
+                    help='Freshdesk ticker number. If provided, return spent time for the ticket')
 
 args = parser.parse_args()
 config = configparser.RawConfigParser()
 config.read(os.path.expanduser(args.config))
 
-# FIXME Time records for one ticket
 if args.ticket:
-    ts = TicketingSystem(config)
-    ts.api_url = f'''{config.get('freshdesk', 'url')}/api/v2/tickets/{args.ticket}/time_entries'''
-    ts.auth = aiohttp.BasicAuth(config.get('freshdesk', 'api_key'), 'X')
-    ts.params = None
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(
-        asyncio.wait(
-            (
-                ts.get_json(),
-            )
-        )
-    )
+    fd = Freshesk(config)
+    print(fd.get_ticket(args.ticket))
 
-    ts.entries = [Entry(id=i.get('ticket_id'),
-                        billable=i.get('billable'),
-                        spent=Time.from_string(i.get('time_spent')),
-                        note=i.get('note'))
-                  for i in ts.json]
-
-    print(f'''Time records for ticket #{args.ticket}:
-Total: {ts.get_total()}
-Bill:  {ts.get_bill()}
-Free:  {ts.get_free()}
-''')
-    exit(0)
-
-if args.offset.isdigit():
-    report_date = datetime.combine(date.today(), datetime.min.time()) - timedelta(days=int(args.offset))
 else:
-    try:
-        report_date = datetime.strptime(args.offset, config.get('global', 'date_format'))
-    except ValueError as e:
-        print(f'''{TermColor.RED}{args.offset} is neither an integer nor matches format {config.get('global', 'date_format')}.
-Try to run script with -h to get help{TermColor.END}''')
-        exit(1)
+    if args.offset.isdigit():
+        report_date = datetime.combine(date.today(), datetime.min.time()) - timedelta(days=int(args.offset))
+    else:
+        try:
+            report_date = datetime.strptime(args.offset, config.get('global', 'date_format'))
+        except ValueError as e:
+            print(f'''{args.offset} is neither an integer nor matches format {config.get('global', 'date_format')}.''')
+            print(f'''Try to run script with -h to get help''')
+            raise SystemExit(1)
 
-# Highlight date if report date if weekend
-date_color = TermColor.RED if report_date.weekday() in (5, 6) else TermColor.END
-print(f'''Time records for {report_date.strftime(f'{date_color}%a %d %b %Y{TermColor.END}')}\n''')
+        # Highlight date if report date if weekend
+        date_color = TermColor.RED if report_date.weekday() in (5, 6) else TermColor.NORM
+        print(f'''Time records for {report_date.strftime(f'{date_color}%a %d %b %Y{TermColor.END}')}\n''')
 
 params = config, report_date
 
-fd = Freshesk(*params)
-tw = TeamWork(*params)
-ji = Jira(*params)
+pool = [cls(*params) for cls in TicketingSystem.__subclasses__()]
 
 loop = asyncio.get_event_loop()
 loop.run_until_complete(
-    asyncio.wait(
-        (
-            fd.get_json(),
-            tw.get_json(),
-            ji.get_json(),
-
-        )
-    )
+    asyncio.wait([ts.get_json() for ts in pool])
 )
 
+
+
+
+
 # FIXME
-ji.get_entries()
-fd.get_entries()
-tw.get_entries()
-
-
-def print_if_not_empty(ts: TicketingSystem):
-    if ts.entries:
-        print(ts)
-
-
-print_if_not_empty(fd)
-print_if_not_empty(ji)
-print_if_not_empty(tw)
+for ts in pool:
+    ts.get_entries()
+    ts.print_if_not_empty()
 
 workday_begin = Time.from_string(config.get('global', 'workday_begin'))
 workday_end = Time.from_string(config.get('global', 'workday_end'))
@@ -322,8 +314,8 @@ workday_duration = workday_end - workday_begin - launch_duration
 
 time_now = Time.from_string(datetime.now().strftime('%H:%M'))
 
-total_bill_time = sum((fd.get_bill(), tw.get_bill(), ji.get_bill()))
-total_free_time = sum((fd.get_free(), tw.get_free(), ji.get_free()))
+total_bill_time = sum(ts.get_bill() for ts in pool)  # sum((fd.get_bill(), tw.get_bill(), ji.get_bill()))
+total_free_time = sum(ts.get_free() for ts in pool)  # sum((fd.get_free(), tw.get_free(), ji.get_free()))
 total_tracked_time = total_bill_time + total_free_time
 
 report_is_now = report_date.date() == date.today() and workday_begin <= time_now <= workday_end
@@ -344,7 +336,7 @@ untracked_time.ceil(5 * 60)
 
 
 def bill_to_free_ratio(bill_time=Time(0), free_time=Time(0), untracked=Time(0),
-                       workday_duration=Time.from_params(hours=8), terminal_width=80):
+                       workday_duration=Time.from_params(hours=8), terminal_width=55):
     total = bill_time.seconds + free_time.seconds + untracked_time.seconds
     rest_time = Time(workday_duration.seconds - total)
     if rest_time.seconds < 0:
@@ -356,25 +348,24 @@ def bill_to_free_ratio(bill_time=Time(0), free_time=Time(0), untracked=Time(0),
     free_part = int(free_time.seconds / total * terminal_width)
     none_part = int(untracked.seconds / total * terminal_width)
     rest_part = int(rest_time.seconds / total * terminal_width)
-    return f'''Progress:
-[{(TermColor.GREEN * (bill_part>0)) + ('#' * bill_part) +
+    return f'''Progress: [{(TermColor.GREEN * (bill_part>0)) + ('#' * bill_part) +
   (TermColor.NORM  * (free_part>0)) + ('#' * free_part) +
   (TermColor.RED   * (none_part>0)) + ('#' * none_part) +
-  TermColor.NORM  + ('_' * rest_part)}]
-'''
+  TermColor.NORM  + ('_' * rest_part)}]'''
 
 
-print(f'''
-Total tracked time: {total_tracked_time}
-- Freshdesk bill:   {fd.get_bill()}
-- Freshdesk free:   {fd.get_free()}
-- Teamwork  bill:   {tw.get_bill()}
-- Teamwork  free:   {tw.get_free()}
-- Jira      free:   {ji.get_free()}
+print(f'\nTotal tracked time: {total_tracked_time}')
+for ts in pool:
+    ts_name = ts.__class__.__name__
+    ts_bill = ts.get_bill()
+    if ts_bill.seconds > 0:
+        print(f'     {ts_name:<8} bill: {ts_bill}')
+    ts_free = ts.get_free()
+    if ts_free.seconds > 0:
+        print(f'     {ts_name:<8} free: {ts_free}')
 
-{bill_to_free_ratio(total_bill_time,
-                    total_free_time,
-                    untracked_time,
-                    workday_duration)}
-Untracked time{' by now' if report_is_now else ''}: {untracked_time}
-''')
+print('\n' + bill_to_free_ratio(total_bill_time,
+                                total_free_time,
+                                untracked_time,
+                                workday_duration))
+print(f'''Untracked time{' by now' if report_is_now else ''}: {untracked_time}''')
