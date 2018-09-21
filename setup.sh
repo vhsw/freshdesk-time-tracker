@@ -7,7 +7,7 @@ then
     exit 37
 fi
 
-pip3 install aiohttp pytz
+pip3 install -r ./requirements.txt
 
 chmod +x ./timer.py
 cp ./timer.py ~/timer.py

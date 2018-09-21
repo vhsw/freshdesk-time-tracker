@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import configparser
 import os
+from collections import namedtuple
 from dataclasses import dataclass, field
 from datetime import datetime, date, timedelta
 from typing import List, Tuple, Dict
@@ -54,10 +55,11 @@ class Time(object):
         return repr_str
 
     def ceil(self, seconds):
-        if self.seconds % seconds != 0:
-            self.seconds = self.seconds // seconds * seconds
-            self.seconds += seconds
-        return self
+        tmp = self
+        if tmp.seconds % seconds != 0:
+            tmp.seconds = tmp.seconds // seconds * seconds
+            tmp.seconds += seconds
+        return tmp
 
     def __repr__(self):
         return self.__format__('''{sign}{day}{hour:02}:{minute:02}''')
@@ -77,16 +79,21 @@ class Time(object):
         return self.__add__(Time(-other.seconds))
 
 
-class TermColor:
-    RED = '\033[91m'
-    YELLOW = '\033[93m'
-    GREEN = '\033[92m'
-    BLUE = '\033[94m'
-    PURPLE = '\033[95m'
-    BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
-    END = '\033[0m'
-    NORM = END
+def colored(text, color):
+    colors = {'black': '\033[30m',
+              'red': '\033[31m',
+              'green': '\033[32m',
+              'yellow': '\033[33m',
+              'blue': '\033[34m',
+              'magenta': '\033[35m',
+              'cyan': '\033[36m',
+              'white': '\033[37m',
+              'reset': '\033[39m',
+              'normal': '\033[39m'}
+    if text:
+        return colors[color] + text + colors['reset']
+    else:
+        return text
 
 
 @dataclass
@@ -148,6 +155,7 @@ class TicketingSystem:
         if self.entries:
             print(self)
 
+
 @dataclass
 class Freshesk(TicketingSystem):
     def __post_init__(self):
@@ -169,7 +177,7 @@ class Freshesk(TicketingSystem):
                         for i in data]
 
     def get_ticket(self, ticket_num):
-        self.api_url = f'''{config.get('freshdesk', 'url')}/api/v2/tickets/{ticket_num}/time_entries'''
+        self.api_url = f'''{self.config.get('freshdesk', 'url')}/api/v2/tickets/{ticket_num}/time_entries'''
         self.params = None
         loop = asyncio.get_event_loop()
         loop.run_until_complete(
@@ -238,7 +246,7 @@ class Jira(TicketingSystem):
                         result = await resp.json()
                         for worklog in result['worklogs']:
                             if (worklog['author']['name'] == self.config.get('jira', 'login') and
-                                    worklog['started'].split('T')[0] == report_date.strftime('%Y-%m-%d')):
+                                    worklog['started'].split('T')[0] == self.report_date.strftime('%Y-%m-%d')):
                                 time_spent = int(worklog.get('timeSpentSeconds'))
                                 self.entries.append(Entry(id=issue_id,
                                                           billable=False,
@@ -256,116 +264,156 @@ class Jira(TicketingSystem):
         loop.close()
 
 
-parser = argparse.ArgumentParser(description='Simple time tracker for Freshdesk, Jira and TeamWork')
-parser.add_argument('offset', default='0', type=str, nargs='?',
-                    help='Offset in days from today or date in format dd-mm-yyyy')
-parser.add_argument('-c', '--config', default='~/config.ini', type=str, nargs='?', help='Path to config')
-parser.add_argument('-ft', '--ticket', type=int, nargs='?',
-                    help='Freshdesk ticker number. If provided, return spent time for the ticket')
+def get_stats(config, pool, report_date, ceil_seconds=5 * 60):
+    workday_begin = Time.from_string(config.get('global', 'workday_begin'))
+    workday_end = Time.from_string(config.get('global', 'workday_end'))
+    launch_begin = Time.from_string(config.get('global', 'launch_begin'))
+    launch_end = Time.from_string(config.get('global', 'launch_end'))
 
-args = parser.parse_args()
-config = configparser.RawConfigParser()
-config.read(os.path.expanduser(args.config))
+    launch_duration = launch_end - launch_begin
+    workday_duration = workday_end - workday_begin - launch_duration
 
-if args.ticket:
-    fd = Freshesk(config)
-    print(fd.get_ticket(args.ticket))
+    time_now = Time.from_string(datetime.now().strftime('%H:%M'))
 
-else:
-    if args.offset.isdigit():
-        report_date = datetime.combine(date.today(), datetime.min.time()) - timedelta(days=int(args.offset))
+    total_bill_time = sum(ts.get_bill() for ts in pool)  # sum((fd.get_bill(), tw.get_bill(), ji.get_bill()))
+    total_free_time = sum(ts.get_free() for ts in pool)  # sum((fd.get_free(), tw.get_free(), ji.get_free()))
+    total_tracked_time = total_bill_time + total_free_time
+
+    report_is_now = report_date.date() == date.today() and workday_begin <= time_now <= workday_end
+
+    if report_is_now:
+        total_time = time_now - workday_begin
+        if launch_begin <= time_now <= launch_end:
+            total_time = launch_begin - workday_begin
+        if time_now > launch_end:
+            total_time -= launch_duration
+
+        untracked_time = total_time - total_tracked_time
+        rest_time = workday_duration - total_tracked_time
     else:
-        try:
-            report_date = datetime.strptime(args.offset, config.get('global', 'date_format'))
-        except ValueError as e:
-            print(f'''{args.offset} is neither an integer nor matches format {config.get('global', 'date_format')}.''')
-            print(f'''Try to run script with -h to get help''')
-            raise SystemExit(1)
+        untracked_time = workday_duration - total_tracked_time
+        rest_time = Time(0)
+
+    # Ceil to 5 minutes
+    untracked_time = untracked_time.ceil(ceil_seconds)
+
+    stats = namedtuple('Stats', ['total_tracked_time',
+                                 'total_bill_time',
+                                 'total_free_time',
+                                 'untracked_time',
+                                 'workday_duration', ])
+
+    return stats(total_tracked_time, total_bill_time, total_free_time, untracked_time, rest_time)
+
+
+def show_stats(pool, stats):
+    print(f'\nTotal tracked time: {stats.total_tracked_time}')
+    for ts in pool:
+        ts_name = ts.__class__.__name__
+        ts_bill = ts.get_bill()
+        if ts_bill.seconds > 0:
+            print(f'     {ts_name:<8} bill: {ts_bill}')
+        ts_free = ts.get_free()
+        if ts_free.seconds > 0:
+            print(f'     {ts_name:<8} free: {ts_free}')
+
+
+def get_ratio(total_tracked_time: Time,
+              total_bill_time: Time,
+              total_free_time: Time,
+              untracked_time: Time,
+              rest_time: Time,
+              terminal_width_chr: int = 55) -> str:
+    total = sum((total_tracked_time,
+                 untracked_time,
+                 rest_time,))
+
+    width = terminal_width_chr / total.seconds
+
+    bill_part = colored('#' * int(total_bill_time.seconds * width), 'green')
+    free_part = colored('#' * int(total_free_time.seconds * width), 'normal')
+    none_part = colored('#' * int(untracked_time.seconds * width), 'red')
+    rest_part = '_' * int(rest_time.seconds * width)
+    return f'''Progress: [{bill_part + free_part + none_part + rest_part}]'''
+
+def export_to_sheet():
+    from googleapiclient.discovery import build
+    from httplib2 import Http
+    from oauth2client import file, client, tools
+    creds = store.get()
+    if not creds or creds.invalid:
+        flow = client.flow_from_clientsecrets('credentials.json', SCOPES)
+        creds = tools.run_flow(flow, store)
+    service = build('sheets', 'v4', http=creds.authorize(Http()))
+
+    # Call the Sheets API
+    SPREADSHEET_ID = '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms'
+    RANGE_NAME = 'Class Data!A2:E'
+    result = service.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID,
+                                                 range=RANGE_NAME).execute()
+    values = result.get('values', [])
+
+    if not values:
+        print('No data found.')
+    else:
+        print('Name, Major:')
+        for row in values:
+            # Print columns A and E, which correspond to indices 0 and 4.
+            print('%s, %s' % (row[0], row[4]))
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Simple time tracker for Freshdesk, Jira and TeamWork')
+    parser.add_argument('offset', default='0', type=str, nargs='?',
+                        help='Offset in days from today or date in format dd-mm-yyyy')
+    parser.add_argument('-c', '--config', default='~/config.ini', type=str, nargs='?', help='Path to config')
+    parser.add_argument('-ft', '--ticket', type=int, nargs='?',
+                        help='Freshdesk ticker number. If provided, return spent time for the ticket')
+
+    args = parser.parse_args()
+    config = configparser.RawConfigParser()
+    config.read(os.path.expanduser(args.config))
+
+    if args.ticket:
+        fd = Freshesk(config)
+        print(fd.get_ticket(args.ticket))
+
+    else:
+        if args.offset.isdigit():
+            report_date = datetime.combine(date.today(), datetime.min.time()) - timedelta(days=int(args.offset))
+        else:
+            try:
+                report_date = datetime.strptime(args.offset, config.get('global', 'date_format'))
+            except ValueError as e:
+                print(
+                    f'''{args.offset} is neither an integer nor matches format {config.get('global', 'date_format')}.''')
+                print(f'''Try to run script with -h to get help''')
+                raise SystemExit(1)
 
         # Highlight date if report date if weekend
-        date_color = TermColor.RED if report_date.weekday() in (5, 6) else TermColor.NORM
-        print(f'''Time records for {report_date.strftime(f'{date_color}%a %d %b %Y{TermColor.END}')}\n''')
+        date_str = report_date.strftime('%a %d %b %Y')
+        if report_date.weekday() in (5, 6):
+            date_str = colored(date_str, 'red')
+        print(f'Time records for {date_str}')
 
-params = config, report_date
+        pool = [cls(config, report_date) for cls in TicketingSystem.__subclasses__()]
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(
+            asyncio.wait([ts.get_json() for ts in pool])
+        )
 
-pool = [cls(*params) for cls in TicketingSystem.__subclasses__()]
+        # FIXME
+        for ts in pool:
+            ts.get_entries()
+            ts.print_if_not_empty()
 
-loop = asyncio.get_event_loop()
-loop.run_until_complete(
-    asyncio.wait([ts.get_json() for ts in pool])
-)
+        stats = get_stats(config, pool, report_date)
+        show_stats(pool, stats)
 
+        print('\n' + get_ratio(*stats))
 
-
-
-
-# FIXME
-for ts in pool:
-    ts.get_entries()
-    ts.print_if_not_empty()
-
-workday_begin = Time.from_string(config.get('global', 'workday_begin'))
-workday_end = Time.from_string(config.get('global', 'workday_end'))
-launch_begin = Time.from_string(config.get('global', 'launch_begin'))
-launch_end = Time.from_string(config.get('global', 'launch_end'))
-
-launch_duration = launch_end - launch_begin
-workday_duration = workday_end - workday_begin - launch_duration
-
-time_now = Time.from_string(datetime.now().strftime('%H:%M'))
-
-total_bill_time = sum(ts.get_bill() for ts in pool)  # sum((fd.get_bill(), tw.get_bill(), ji.get_bill()))
-total_free_time = sum(ts.get_free() for ts in pool)  # sum((fd.get_free(), tw.get_free(), ji.get_free()))
-total_tracked_time = total_bill_time + total_free_time
-
-report_is_now = report_date.date() == date.today() and workday_begin <= time_now <= workday_end
-
-if report_is_now:
-    total_time = time_now - workday_begin
-    if launch_begin <= time_now <= launch_end:
-        total_time = launch_begin - workday_begin
-    if time_now > launch_end:
-        total_time -= launch_duration
-
-    untracked_time = total_time - total_tracked_time
-else:
-    untracked_time = workday_duration - total_tracked_time
-
-# Ceil to 5 minutes
-untracked_time.ceil(5 * 60)
+        print(f'''Untracked time: {stats.untracked_time}''')
 
 
-def bill_to_free_ratio(bill_time=Time(0), free_time=Time(0), untracked=Time(0),
-                       workday_duration=Time.from_params(hours=8), terminal_width=55):
-    total = bill_time.seconds + free_time.seconds + untracked_time.seconds
-    rest_time = Time(workday_duration.seconds - total)
-    if rest_time.seconds < 0:
-        rest_time = Time(0)
-    else:
-        total = workday_duration.seconds
-
-    bill_part = int(bill_time.seconds / total * terminal_width)
-    free_part = int(free_time.seconds / total * terminal_width)
-    none_part = int(untracked.seconds / total * terminal_width)
-    rest_part = int(rest_time.seconds / total * terminal_width)
-    return f'''Progress: [{(TermColor.GREEN * (bill_part>0)) + ('#' * bill_part) +
-  (TermColor.NORM  * (free_part>0)) + ('#' * free_part) +
-  (TermColor.RED   * (none_part>0)) + ('#' * none_part) +
-  TermColor.NORM  + ('_' * rest_part)}]'''
-
-
-print(f'\nTotal tracked time: {total_tracked_time}')
-for ts in pool:
-    ts_name = ts.__class__.__name__
-    ts_bill = ts.get_bill()
-    if ts_bill.seconds > 0:
-        print(f'     {ts_name:<8} bill: {ts_bill}')
-    ts_free = ts.get_free()
-    if ts_free.seconds > 0:
-        print(f'     {ts_name:<8} free: {ts_free}')
-
-print('\n' + bill_to_free_ratio(total_bill_time,
-                                total_free_time,
-                                untracked_time,
-                                workday_duration))
-print(f'''Untracked time{' by now' if report_is_now else ''}: {untracked_time}''')
+if __name__ == '__main__':
+    main()
