@@ -133,7 +133,7 @@ class TicketingSystem:
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.get(self.api_url, params=self.params, timeout=self.timeout, auth=self.auth) as resp:
-                    self.json = await resp.json()
+                    return await resp.json()
             except asyncio.TimeoutError:
                 print(f'Got timeout while getting {self.__class__.__name__}')
 
@@ -151,13 +151,14 @@ class TicketingSystem:
     def get_total(self):
         return self.get_bill() + self.get_free()
 
-    async def print_if_not_empty(self):
+    def print_if_not_empty(self):
         if self.entries:
             print(self)
 
 
 @dataclass
 class Freshesk(TicketingSystem):
+    # FIXME someday in must become async and include self.json = self.get.json() initialisation
     def __post_init__(self):
         self.report_date -= timedelta(hours=self.config.getint('freshdesk', 'tz_shift')) + timedelta(seconds=1)
         self.auth = aiohttp.BasicAuth(self.config.get('freshdesk', 'api_key'), 'X')
@@ -169,17 +170,20 @@ class Freshesk(TicketingSystem):
         self.entry_url = self.url + '/a/tickets/'
 
     async def get_entries(self):
-        data = sorted(self.json, key=lambda k: (k.get('ticket_id'), k.get('updated_at'))) if self.json else []
-        self.entries = [Entry(id=i.get('ticket_id'),
-                              billable=i.get('billable'),
-                              spent=Time.from_string(i.get('time_spent')),
-                              note=i.get('note'))
-                        for i in data]
+        self.json = await self.get_json()
+        if self.json:
+            data = sorted(self.json, key=lambda k: (k.get('ticket_id'), k.get('updated_at')))
+            self.entries = [Entry(id=i.get('ticket_id'),
+                                  billable=i.get('billable'),
+                                  spent=Time.from_string(i.get('time_spent')),
+                                  note=i.get('note'))
+                            for i in data]
+        return self
 
     async def get_ticket(self, ticket_num):
         self.api_url = f'''{self.config.get('freshdesk', 'url')}/api/v2/tickets/{ticket_num}/time_entries'''
         self.params = None
-        await self.get_json()
+        self.json = await self.get_json()
         self.entries = [Entry(id=i.get('ticket_id'),
                               billable=i.get('billable'),
                               spent=Time.from_string(i.get('time_spent')),
@@ -207,12 +211,15 @@ class TeamWork(TicketingSystem):
         }
 
     async def get_entries(self):
-        data = sorted(self.json.get('time-entries'), key=lambda k: (k.get('date'))) if self.json else []
-        self.entries = [Entry(id=i.get('todo-item-id'),
-                              spent=(Time(int(i.get('hours')) * 3600 + int(i.get('minutes')) * 60)),
-                              billable=(i.get('isbillable') == 1),
-                              note=i.get('project-name'))
-                        for i in data]
+        self.json = await self.get_json()
+        if self.json:
+            data = sorted(self.json.get('time-entries'), key=lambda k: (k.get('date')))
+            self.entries = [Entry(id=i.get('todo-item-id'),
+                                  spent=(Time(int(i.get('hours')) * 3600 + int(i.get('minutes')) * 60)),
+                                  billable=(i.get('isbillable') == 1),
+                                  note=i.get('project-name'))
+                            for i in data]
+        return self
 
 
 @dataclass
@@ -246,9 +253,12 @@ class Jira(TicketingSystem):
                 except asyncio.TimeoutError:
                     print(f'Got timeout while getting {url}')
 
+        self.json = await self.get_json()
         if self.json:
             for issue in self.json.get('issues'):
                 await get_issue(issue.get('self') + '/worklog', issue.get('key'))
+
+        return self
 
 
 def get_stats(config, pool, report_date, ceil_seconds=5 * 60):
@@ -262,8 +272,8 @@ def get_stats(config, pool, report_date, ceil_seconds=5 * 60):
 
     time_now = Time.from_string(datetime.now().strftime('%H:%M'))
 
-    total_bill_time = sum(ts.get_bill() for ts in pool)  # sum((fd.get_bill(), tw.get_bill(), ji.get_bill()))
-    total_free_time = sum(ts.get_free() for ts in pool)  # sum((fd.get_free(), tw.get_free(), ji.get_free()))
+    total_bill_time = sum(ts.get_bill() for ts in pool)
+    total_free_time = sum(ts.get_free() for ts in pool)
     total_tracked_time = total_bill_time + total_free_time
 
     report_is_now = report_date.date() == date.today() and workday_begin <= time_now <= workday_end
@@ -338,7 +348,8 @@ async def main():
 
     if args.ticket:
         fd = Freshesk(config)
-        print(await fd.get_ticket(args.ticket))
+        result = await fd.get_ticket(args.ticket)
+        print(result)
 
     else:
         if args.offset.isdigit():
@@ -359,10 +370,10 @@ async def main():
         print(f'Time records for {date_str}')
 
         pool = [cls(config, report_date) for cls in TicketingSystem.__subclasses__()]
-        for ts in pool:
-            await ts.get_json()
-            await ts.get_entries()
-            await ts.print_if_not_empty()
+        tasks = [asyncio.create_task(ts.get_entries()) for ts in pool]
+        for task in asyncio.as_completed(tasks):
+            ts = await task
+            ts.print_if_not_empty()
 
         stats = get_stats(config, pool, report_date)
         show_stats(pool, stats)
