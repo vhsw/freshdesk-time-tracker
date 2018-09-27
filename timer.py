@@ -137,7 +137,7 @@ class TicketingSystem:
             except asyncio.TimeoutError:
                 print(f'Got timeout while getting {self.__class__.__name__}')
 
-    def get_entries(self):
+    async def get_entries(self):
         raise NotImplementedError
 
     def get_bill(self):
@@ -151,7 +151,7 @@ class TicketingSystem:
     def get_total(self):
         return self.get_bill() + self.get_free()
 
-    def print_if_not_empty(self):
+    async def print_if_not_empty(self):
         if self.entries:
             print(self)
 
@@ -168,7 +168,7 @@ class Freshesk(TicketingSystem):
         self.api_url = self.url + '/api/v2/time_entries'
         self.entry_url = self.url + '/a/tickets/'
 
-    def get_entries(self):
+    async def get_entries(self):
         data = sorted(self.json, key=lambda k: (k.get('ticket_id'), k.get('updated_at'))) if self.json else []
         self.entries = [Entry(id=i.get('ticket_id'),
                               billable=i.get('billable'),
@@ -176,18 +176,10 @@ class Freshesk(TicketingSystem):
                               note=i.get('note'))
                         for i in data]
 
-    def get_ticket(self, ticket_num):
+    async def get_ticket(self, ticket_num):
         self.api_url = f'''{self.config.get('freshdesk', 'url')}/api/v2/tickets/{ticket_num}/time_entries'''
         self.params = None
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(
-            asyncio.wait(
-                (
-                    self.get_json(),
-                )
-            )
-        )
-
+        await self.get_json()
         self.entries = [Entry(id=i.get('ticket_id'),
                               billable=i.get('billable'),
                               spent=Time.from_string(i.get('time_spent')),
@@ -214,7 +206,7 @@ class TeamWork(TicketingSystem):
             'todate': self.report_date.strftime('%Y%m%d')
         }
 
-    def get_entries(self):
+    async def get_entries(self):
         data = sorted(self.json.get('time-entries'), key=lambda k: (k.get('date'))) if self.json else []
         self.entries = [Entry(id=i.get('todo-item-id'),
                               spent=(Time(int(i.get('hours')) * 3600 + int(i.get('minutes')) * 60)),
@@ -237,8 +229,7 @@ class Jira(TicketingSystem):
             'maxResults': 1000,
             'fields': 'id'}
 
-    # FIXME
-    def get_entries(self):
+    async def get_entries(self):
         async def get_issue(url, issue_id):
             async with aiohttp.ClientSession() as session:
                 try:
@@ -255,13 +246,9 @@ class Jira(TicketingSystem):
                 except asyncio.TimeoutError:
                     print(f'Got timeout while getting {url}')
 
-        loop = asyncio.get_event_loop()
         if self.json:
-            tasks = [get_issue(issue.get('self') + '/worklog', issue.get('key')) for issue in self.json.get('issues')]
-        else:
-            tasks = []
-        loop.run_until_complete(asyncio.gather(*tasks))
-        loop.close()
+            for issue in self.json.get('issues'):
+                await get_issue(issue.get('self') + '/worklog', issue.get('key'))
 
 
 def get_stats(config, pool, report_date, ceil_seconds=5 * 60):
@@ -336,34 +323,9 @@ def get_ratio(total_tracked_time: Time,
     rest_part = '_' * int(rest_time.seconds * width)
     return f'''Progress: [{bill_part + free_part + none_part + rest_part}]'''
 
-def export_to_sheet():
-    from googleapiclient.discovery import build
-    from httplib2 import Http
-    from oauth2client import file, client, tools
-    creds = store.get()
-    if not creds or creds.invalid:
-        flow = client.flow_from_clientsecrets('credentials.json', SCOPES)
-        creds = tools.run_flow(flow, store)
-    service = build('sheets', 'v4', http=creds.authorize(Http()))
 
-    # Call the Sheets API
-    SPREADSHEET_ID = '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms'
-    RANGE_NAME = 'Class Data!A2:E'
-    result = service.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID,
-                                                 range=RANGE_NAME).execute()
-    values = result.get('values', [])
-
-    if not values:
-        print('No data found.')
-    else:
-        print('Name, Major:')
-        for row in values:
-            # Print columns A and E, which correspond to indices 0 and 4.
-            print('%s, %s' % (row[0], row[4]))
-
-
-def main():
-    parser = argparse.ArgumentParser(description='Simple time tracker for Freshdesk, Jira and TeamWork')
+async def main():
+    parser = argparse.ArgumentParser(description='Simple time tracker for Freshdesk, TeamWork and Jira')
     parser.add_argument('offset', default='0', type=str, nargs='?',
                         help='Offset in days from today or date in format dd-mm-yyyy')
     parser.add_argument('-c', '--config', default='~/config.ini', type=str, nargs='?', help='Path to config')
@@ -376,7 +338,7 @@ def main():
 
     if args.ticket:
         fd = Freshesk(config)
-        print(fd.get_ticket(args.ticket))
+        print(await fd.get_ticket(args.ticket))
 
     else:
         if args.offset.isdigit():
@@ -397,23 +359,17 @@ def main():
         print(f'Time records for {date_str}')
 
         pool = [cls(config, report_date) for cls in TicketingSystem.__subclasses__()]
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(
-            asyncio.wait([ts.get_json() for ts in pool])
-        )
-
-        # FIXME
         for ts in pool:
-            ts.get_entries()
-            ts.print_if_not_empty()
+            await ts.get_json()
+            await ts.get_entries()
+            await ts.print_if_not_empty()
 
         stats = get_stats(config, pool, report_date)
         show_stats(pool, stats)
 
         print('\n' + get_ratio(*stats))
-
         print(f'''Untracked time: {stats.untracked_time}''')
 
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
