@@ -179,13 +179,14 @@ class Freshesk(TicketingSystem):
                                   note=i.get('note'))
                             for i in data]
 
-            for entry in self.entries:
-                if entry.billable:
-                    if any(tag in entry.note for tag in self.free_tags):
-                        entry.note += colored(' Warn! Billable entry with free tag!', 'red')
-                else:
-                    if all(tag not in entry.note for tag in self.free_tags):
-                        entry.note += colored(' Warn! Free entry without free tag!', 'red')
+            if self.free_tags:
+                for entry in self.entries:
+                    if entry.billable:
+                        if any(tag in entry.note for tag in self.free_tags):
+                            entry.note += colored(' Warn! Billable entry with free tag!', 'red')
+                    else:
+                        if all(tag not in entry.note for tag in self.free_tags):
+                            entry.note += colored(' Warn! Free entry without free tag!', 'red')
 
     async def get_entries(self):
         self.json = await self.get_json()
