@@ -72,7 +72,7 @@ Also, you can specify the exact date DD.MM.YYYY (you can change date format in c
 timer.py 14.09.2018
 ```
 
-And you can get total spent time report for single Freshdesk ticket using -t and ticket number:
+And you can get total spent time report for single Freshdesk ticket using -ft and ticket number:
 ```
-timer.py -t 27974
+timer.py -ft 27974
 ```

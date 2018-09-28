@@ -370,10 +370,13 @@ async def main():
         print(f'Time records for {date_str}')
 
         pool = [cls(config, report_date) for cls in TicketingSystem.__subclasses__()]
-        tasks = [asyncio.create_task(ts.get_entries()) for ts in pool]
-        for task in asyncio.as_completed(tasks):
-            ts = await task
-            ts.print_if_not_empty()
+        tasks = asyncio.as_completed([asyncio.create_task(ts.get_entries()) for ts in pool])
+        for task in tasks:
+            try:
+                ts = await task
+                ts.print_if_not_empty()
+            except asyncio.CancelledError as e:
+                task.close()
 
         stats = get_stats(config, pool, report_date)
         show_stats(pool, stats)
@@ -383,4 +386,7 @@ async def main():
 
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt as e:
+        SystemExit(1)
