@@ -168,9 +168,9 @@ class Freshesk(TicketingSystem):
         self.url = self.config.get('freshdesk', 'url')
         self.api_url = self.url + '/api/v2/time_entries'
         self.entry_url = self.url + '/a/tickets/'
+        self.free_tags = self.config.get('freshdesk', 'free_tags').split()
 
-    async def get_entries(self):
-        self.json = await self.get_json()
+    def __parse_json__(self):
         if self.json:
             data = sorted(self.json, key=lambda k: (k.get('ticket_id'), k.get('updated_at')))
             self.entries = [Entry(id=i.get('ticket_id'),
@@ -178,17 +178,25 @@ class Freshesk(TicketingSystem):
                                   spent=Time.from_string(i.get('time_spent')),
                                   note=i.get('note'))
                             for i in data]
+
+            for entry in self.entries:
+                if entry.billable:
+                    if any(tag in entry.note for tag in self.free_tags):
+                        entry.note += colored(' Warn! Billable entry with free tag!', 'red')
+                else:
+                    if all(tag not in entry.note for tag in self.free_tags):
+                        entry.note += colored(' Warn! Free entry without free tag!', 'red')
+
+    async def get_entries(self):
+        self.json = await self.get_json()
+        self.__parse_json__()
         return self
 
     async def get_ticket(self, ticket_num):
         self.api_url = f'''{self.config.get('freshdesk', 'url')}/api/v2/tickets/{ticket_num}/time_entries'''
         self.params = None
         self.json = await self.get_json()
-        self.entries = [Entry(id=i.get('ticket_id'),
-                              billable=i.get('billable'),
-                              spent=Time.from_string(i.get('time_spent')),
-                              note=i.get('note'))
-                        for i in self.json]
+        self.__parse_json__()
 
         return (f'''Time records for ticket {ticket_num}:
         Total: {self.get_total()}
