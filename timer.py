@@ -10,6 +10,8 @@ from datetime import datetime, date, timedelta
 from typing import List, Tuple, Dict
 
 import aiohttp
+import keyring
+import pytz
 
 
 @dataclass(order=True)
@@ -157,12 +159,16 @@ class TicketingSystem:
 
 
 @dataclass
-class Freshesk(TicketingSystem):
+class Freshdesk(TicketingSystem):
     # FIXME someday in must become async and include self.json = self.get.json() initialisation
     def __post_init__(self):
-        self.report_date -= timedelta(hours=self.config.getint('freshdesk', 'tz_shift')) + timedelta(seconds=1)
-        self.auth = aiohttp.BasicAuth(self.config.get('freshdesk', 'api_key'), 'X')
-        self.params = {'agent_id': self.config.get('freshdesk', 'agent_id'),
+        local = pytz.timezone(self.config.get('global', 'timezone'))
+        local_dt = local.localize(self.report_date)
+        utc_dt = local_dt.astimezone(pytz.utc)
+        self.report_date = utc_dt - timedelta(seconds=1)
+        self.agent_id = self.config.get('freshdesk', 'agent_id')
+        self.auth = aiohttp.BasicAuth(keyring.get_password('freshdesk', self.agent_id), 'X')
+        self.params = {'agent_id': self.agent_id,
                        'executed_after': self.report_date.strftime('%Y-%m-%dT%H:%M:%SZ'),
                        'executed_before': (self.report_date + timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ')}
         self.url = self.config.get('freshdesk', 'url')
@@ -209,7 +215,8 @@ class Freshesk(TicketingSystem):
 @dataclass
 class TeamWork(TicketingSystem):
     def __post_init__(self):
-        self.auth = aiohttp.BasicAuth(self.config.get('teamwork', 'api_key'), 'x')
+        self.agent_id = self.config.get('teamwork', 'agent_id')
+        self.auth = aiohttp.BasicAuth(keyring.get_password('teamwork', self.agent_id), 'x')
         self.url = self.config.get('teamwork', 'url')
         self.api_url = self.url + '/time_entries.json'
         self.entry_url = self.url + '/#tasks/'
@@ -234,9 +241,8 @@ class TeamWork(TicketingSystem):
 @dataclass
 class Jira(TicketingSystem):
     def __post_init__(self):
-        jira_login = self.config.get('jira', 'login')
-        jira_pass = self.config.get('jira', 'password')
-        self.auth = aiohttp.BasicAuth(jira_login, jira_pass)
+        self.login = self.config.get('jira', 'login')
+        self.auth = aiohttp.BasicAuth(self.login, keyring.get_password('jira', self.login))
         self.url = self.config.get('jira', 'url')
         self.api_url = self.url + '/rest/api/2/search'
         self.entry_url = self.url + '/browse/'
@@ -270,7 +276,7 @@ class Jira(TicketingSystem):
         return self
 
 
-def get_stats(config, pool, report_date, ceil_seconds=5 * 60):
+def calc_stats(total_bill_time, total_free_time, time_now, report_date, config, ceil_seconds=5 * 60):
     workday_begin = Time.from_string(config.get('global', 'workday_begin'))
     workday_end = Time.from_string(config.get('global', 'workday_end'))
     launch_begin = Time.from_string(config.get('global', 'launch_begin'))
@@ -278,27 +284,22 @@ def get_stats(config, pool, report_date, ceil_seconds=5 * 60):
 
     launch_duration = launch_end - launch_begin
     workday_duration = workday_end - workday_begin - launch_duration
-
-    time_now = Time.from_string(datetime.now().strftime('%H:%M'))
-
-    total_bill_time = sum(ts.get_bill() for ts in pool)
-    total_free_time = sum(ts.get_free() for ts in pool)
     total_tracked_time = total_bill_time + total_free_time
-
     report_is_now = report_date.date() == date.today() and workday_begin <= time_now <= workday_end
 
     if report_is_now:
-        total_time = time_now - workday_begin
-        if launch_begin <= time_now <= launch_end:
-            total_time = launch_begin - workday_begin
-        if time_now > launch_end:
-            total_time -= launch_duration
+        if time_now < launch_begin:
+            time_from_wd_begin = time_now - workday_begin
+        elif launch_begin <= time_now <= launch_end:
+            time_from_wd_begin = launch_begin - workday_begin
+        else:
+            time_from_wd_begin = time_now - workday_begin - launch_duration
 
-        untracked_time = total_time - total_tracked_time
-        rest_time = workday_duration - total_tracked_time
+        untracked_time = time_from_wd_begin - total_tracked_time
+        till_end_of_work_time = workday_duration - time_from_wd_begin
     else:
         untracked_time = workday_duration - total_tracked_time
-        rest_time = Time(0)
+        till_end_of_work_time = Time(0)
 
     # Ceil to 5 minutes
     untracked_time = untracked_time.ceil(ceil_seconds)
@@ -307,56 +308,114 @@ def get_stats(config, pool, report_date, ceil_seconds=5 * 60):
                                  'total_bill_time',
                                  'total_free_time',
                                  'untracked_time',
+                                 'till_end_of_work_time',
                                  'workday_duration', ])
 
-    return stats(total_tracked_time, total_bill_time, total_free_time, untracked_time, rest_time)
+    return stats(total_tracked_time,
+                 total_bill_time,
+                 total_free_time,
+                 untracked_time,
+                 till_end_of_work_time,
+                 workday_duration)
 
 
-def show_stats(pool, stats):
-    print(f'\nTotal tracked time: {stats.total_tracked_time}')
+def get_stats_str(pool, stats):
+    res = [f'Total tracked time: {stats.total_tracked_time}']
     for ts in pool:
         ts_name = ts.__class__.__name__
         ts_bill = ts.get_bill()
         if ts_bill.seconds > 0:
-            print(f'     {ts_name:<8} bill: {ts_bill}')
+            res.append(f'     {ts_name:<8} bill: {ts_bill}')
         ts_free = ts.get_free()
         if ts_free.seconds > 0:
-            print(f'     {ts_name:<8} free: {ts_free}')
+            res.append(f'     {ts_name:<8} free: {ts_free}')
+
+    return '\n'.join(res)
 
 
-def get_ratio(total_tracked_time: Time,
-              total_bill_time: Time,
-              total_free_time: Time,
-              untracked_time: Time,
-              rest_time: Time,
-              terminal_width_chr: int = 55) -> str:
-    total = sum((total_tracked_time,
-                 untracked_time,
-                 rest_time,))
+def get_ratio_str(stats, terminal_width_chr: int = 48) -> str:
+    total = max(stats.total_tracked_time, stats.workday_duration)
 
-    width = terminal_width_chr / total.seconds
+    width = total.seconds / terminal_width_chr
 
-    bill_part = colored('#' * int(total_bill_time.seconds * width), 'green')
-    free_part = colored('#' * int(total_free_time.seconds * width), 'normal')
-    none_part = colored('#' * int(untracked_time.seconds * width), 'red')
-    rest_part = '_' * int(rest_time.seconds * width)
-    return f'''Progress: [{bill_part + free_part + none_part + rest_part}]'''
+    if stats.untracked_time.seconds > 0:
+        untracked_time = stats.untracked_time
+    else:
+        untracked_time = Time(0)
+
+    if stats.total_tracked_time > stats.workday_duration:
+        rest_time = Time(0)
+    else:
+        rest_time = stats.workday_duration - stats.total_tracked_time - untracked_time
+
+    bill_part = colored('#' * round(stats.total_bill_time.seconds / width), 'green')
+    free_part = colored('#' * round(stats.total_free_time.seconds / width), 'normal')
+    none_part = colored('#' * round(untracked_time.seconds / width), 'red')
+    rest_part = '_' * round(rest_time.seconds / width)
+    return f'Progress: [{bill_part + free_part + none_part + rest_part}]'
+
+
+def setup_wizard(config, config_path):
+    def get_option(prompt, default=''):
+        if default:
+            res = input(prompt + f' [{default}]?: ')
+        else:
+            res = input(prompt + ': ')
+        if not res:
+            res = default
+        return res
+
+    print(f'''Cannot find config at {config_path}. Let's create it!''')
+    config.add_section('global')
+    config.set('global', 'workday_begin', get_option('Workday begins at', '10:00'))
+    config.set('global', 'workday_end', get_option('Workday ends at', '19:00'))
+    config.set('global', 'launch_begin', get_option('Launch begins at', '13:00'))
+    config.set('global', 'launch_end', get_option('Launch ends at', '14:00'))
+    config.set('global', 'timezone', get_option('Timezone is', 'Europe/Moscow'))
+    config.set('global', 'date_format', get_option('Date format is', '%d.%m.%Y'))
+
+    if 'y' in get_option('Add Freshdesk details', 'Y/n').lower():
+        config.add_section('freshdesk')
+        config.set('freshdesk', 'url', 'https://' + get_option('Company name').lower() + '.freshdesk.com')
+        config.set('freshdesk', 'agent_id', get_option('Agent ID'))
+        keyring.set_password('freshdesk', config.get('freshdesk', 'agent_id'), get_option('API key'))
+        config.set('freshdesk', 'free_tags', get_option('Tags with non-billable time',
+                                                        'DEVBUG SUPBUG STUDY HELP CONTR COM ORG OTHER UPDATE'))
+
+    if 'y' in get_option('Add Jira details', 'Y/n').lower():
+        config.add_section('jira')
+        config.set('jira', 'url', get_option('Jira URL'))
+        config.set('jira', 'login', get_option('Login'))
+        keyring.set_password('jira', config.get('jira', 'login'), get_option('Password'))
+
+    if 'y' in get_option('Add TeamWork details', 'Y/n').lower():
+        config.add_section('teamwork')
+        config.set('teamwork', 'url', get_option('TeamWork URL', 'latera'))
+        config.set('teamwork', 'agent_id', get_option('Agent ID'))
+        keyring.set_password('teamwork', config.get('teamwork', 'agent_id'), get_option('API key'))
+
+    with open(config_path, mode='w') as f:
+        config.write(f)
 
 
 async def main():
     parser = argparse.ArgumentParser(description='Simple time tracker for Freshdesk, TeamWork and Jira')
     parser.add_argument('offset', default='0', type=str, nargs='?',
                         help='Offset in days from today or date in format dd-mm-yyyy')
-    parser.add_argument('-c', '--config', default='~/config.ini', type=str, nargs='?', help='Path to config')
-    parser.add_argument('-ft', '--ticket', type=int, nargs='?',
+    parser.add_argument('-c', '--config', default='~/timer.conf', type=str, nargs='?', help='Path to config')
+    parser.add_argument('-t', '--ticket', type=int, nargs='?',
                         help='Freshdesk ticker number. If provided, return spent time for the ticket')
 
     args = parser.parse_args()
     config = configparser.RawConfigParser()
+    config_path = os.path.expanduser(args.config)
+    if not os.path.exists(config_path):
+        setup_wizard(config, config_path)
+
     config.read(os.path.expanduser(args.config))
 
     if args.ticket:
-        fd = Freshesk(config)
+        fd = Freshdesk(config)
         result = await fd.get_ticket(args.ticket)
         print(result)
 
@@ -366,10 +425,10 @@ async def main():
         else:
             try:
                 report_date = datetime.strptime(args.offset, config.get('global', 'date_format'))
-            except ValueError as e:
+            except ValueError:
                 print(
-                    f'''{args.offset} is neither an integer nor matches format {config.get('global', 'date_format')}.''')
-                print(f'''Try to run script with -h to get help''')
+                    f'{args.offset} is neither an integer nor matches format {config.get("global", "date_format")}.')
+                print(f'Try to run script with -h to get help')
                 raise SystemExit(1)
 
         # Highlight date if report date if weekend
@@ -378,19 +437,29 @@ async def main():
             date_str = colored(date_str, 'red')
         print(f'Time records for {date_str}')
 
-        pool = [cls(config, report_date) for cls in TicketingSystem.__subclasses__()]
+        pool = [cls(config, report_date) for cls in TicketingSystem.__subclasses__() if
+                config.has_section(cls.__name__.lower())]
         tasks = asyncio.as_completed([asyncio.create_task(ts.get_entries()) for ts in pool])
         for task in tasks:
             try:
                 ts = await task
                 ts.print_if_not_empty()
-            except asyncio.CancelledError as e:
+            except asyncio.CancelledError:
                 task.close()
 
-        stats = get_stats(config, pool, report_date)
-        show_stats(pool, stats)
+        time_now = Time.from_string(datetime.now().strftime('%H:%M'))
 
-        print('\n' + get_ratio(*stats))
+        total_bill_time = sum(ts.get_bill() for ts in pool)
+        total_free_time = sum(ts.get_free() for ts in pool)
+
+        stats = calc_stats(total_bill_time=total_bill_time,
+                           total_free_time=total_free_time,
+                           time_now=time_now,
+                           report_date=report_date,
+                           config=config)
+
+        print('\n' + get_stats_str(pool, stats))
+        print('\n' + get_ratio_str(stats))
         print(f'''Untracked time: {stats.untracked_time}''')
 
 
