@@ -1,5 +1,5 @@
-# Freshdesk timer
-Simple time tracker for Freshdesk, Jira and Teamwork.
+# Time tracking app
+Simple time tracking app for Freshdesk, Jira and Teamwork.
 
 ## Installation
 Just place timer.py in any convenient place on your device. 
