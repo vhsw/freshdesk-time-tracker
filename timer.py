@@ -49,12 +49,13 @@ class Time(object):
 
         second = total_seconds
 
-        repr_str = t_format.format(sign='-' if negative else '',
-                                   day=f'{day} day ' if day > 0 else '',
-                                   hour=hour,
-                                   minute=minute,
-                                   second=second)
-        return repr_str
+        return t_format.format(
+            sign='-' if negative else '',
+            day=f'{day} day ' if day > 0 else '',
+            hour=hour,
+            minute=minute,
+            second=second,
+        )
 
     def ceil(self, seconds):
         tmp = self
@@ -67,15 +68,10 @@ class Time(object):
         return self.__format__('''{sign}{day}{hour:02}:{minute:02}''')
 
     def __add__(self, other):
-        if other == 0:
-            return self
-        return Time(self.seconds + other.seconds)
+        return self if other == 0 else Time(self.seconds + other.seconds)
 
     def __radd__(self, other):
-        if type(other) is int:
-            return self
-        else:
-            return self.__add__(other)
+        return self if type(other) is int else self.__add__(other)
 
     def __sub__(self, other):
         return self.__add__(Time(-other.seconds))
@@ -92,10 +88,7 @@ def colored(text, color):
               'white': '\033[37m',
               'reset': '\033[39m',
               'normal': '\033[39m'}
-    if text:
-        return colors[color] + text + colors['reset']
-    else:
-        return text
+    return colors[color] + text + colors['reset'] if text else text
 
 
 @dataclass
@@ -121,11 +114,11 @@ class TicketingSystem:
     timeout: int = field(init=False, default=5)
 
     def __str__(self):
-        res = []
-        for entry in self.entries:
-            res.append(
-                f'''{self.entry_url}{entry.id}'''
-                f'''\n\t{'Bill' if entry.billable else 'Free'}: {entry.spent} {entry.note}''')
+        res = [
+            f'''{self.entry_url}{entry.id}\n\t{'Bill' if entry.billable else 'Free'}: {entry.spent} {entry.note}'''
+            for entry in self.entries
+        ]
+
         return '\n'.join(res)
 
     def __repr__(self):
@@ -143,12 +136,10 @@ class TicketingSystem:
         raise NotImplementedError
 
     def get_bill(self):
-        time = Time(sum(i.spent.seconds for i in self.entries if i.billable))
-        return time
+        return Time(sum(i.spent.seconds for i in self.entries if i.billable))
 
     def get_free(self):
-        time = Time(sum(i.spent.seconds for i in self.entries if not i.billable))
-        return time
+        return Time(sum(i.spent.seconds for i in self.entries if not i.billable))
 
     def get_total(self):
         return self.get_bill() + self.get_free()
@@ -172,27 +163,27 @@ class Freshdesk(TicketingSystem):
                        'executed_after': self.report_date.strftime('%Y-%m-%dT%H:%M:%SZ'),
                        'executed_before': (self.report_date + timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ')}
         self.url = self.config.get('freshdesk', 'url')
-        self.api_url = self.url + '/api/v2/time_entries'
-        self.entry_url = self.url + '/a/tickets/'
+        self.api_url = f'{self.url}/api/v2/time_entries'
+        self.entry_url = f'{self.url}/a/tickets/'
         self.free_tags = self.config.get('freshdesk', 'free_tags').split()
 
     def __parse_json__(self):
-        if self.json:
-            data = sorted(self.json, key=lambda k: (k.get('ticket_id'), k.get('updated_at')))
-            self.entries = [Entry(id=i.get('ticket_id'),
-                                  billable=i.get('billable'),
-                                  spent=Time.from_string(i.get('time_spent')),
-                                  note=i.get('note'))
-                            for i in data]
+        if not self.json:
+            return
+        data = sorted(self.json, key=lambda k: (k.get('ticket_id'), k.get('updated_at')))
+        self.entries = [Entry(id=i.get('ticket_id'),
+                              billable=i.get('billable'),
+                              spent=Time.from_string(i.get('time_spent')),
+                              note=i.get('note'))
+                        for i in data]
 
-            if self.free_tags:
-                for entry in self.entries:
-                    if entry.billable:
-                        if any(tag in entry.note for tag in self.free_tags):
-                            entry.note += colored(' Warn! Billable entry with free tag!', 'red')
-                    else:
-                        if all(tag not in entry.note for tag in self.free_tags):
-                            entry.note += colored(' Warn! Free entry without free tag!', 'red')
+        if self.free_tags:
+            for entry in self.entries:
+                if entry.billable:
+                    if any(tag in entry.note for tag in self.free_tags):
+                        entry.note += colored(' Warn! Billable entry with free tag!', 'red')
+                elif all(tag not in entry.note for tag in self.free_tags):
+                    entry.note += colored(' Warn! Free entry without free tag!', 'red')
 
     async def get_entries(self):
         self.json = await self.get_json()
@@ -218,8 +209,8 @@ class TeamWork(TicketingSystem):
         self.agent_id = self.config.get('teamwork', 'agent_id')
         self.auth = aiohttp.BasicAuth(keyring.get_password('teamwork', self.agent_id), 'x')
         self.url = self.config.get('teamwork', 'url')
-        self.api_url = self.url + '/time_entries.json'
-        self.entry_url = self.url + '/#tasks/'
+        self.api_url = f'{self.url}/time_entries.json'
+        self.entry_url = f'{self.url}/#tasks/'
         self.params = {
             'userId': self.config.get('teamwork', 'agent_id'),
             'fromdate': self.report_date.strftime('%Y%m%d'),
@@ -244,8 +235,8 @@ class Jira(TicketingSystem):
         self.login = self.config.get('jira', 'login')
         self.auth = aiohttp.BasicAuth(self.login, keyring.get_password('jira', self.login))
         self.url = self.config.get('jira', 'url')
-        self.api_url = self.url + '/rest/api/2/search'
-        self.entry_url = self.url + '/browse/'
+        self.api_url = f'{self.url}/rest/api/2/search'
+        self.entry_url = f'{self.url}/browse/'
         self.params = {
             'jql': f'''worklogAuthor=currentUser() and worklogDate={self.report_date.strftime('%Y-%m-%d')}''',
             'maxResults': 1000,
@@ -357,10 +348,7 @@ def get_ratio_str(stats, terminal_width_chr: int = 48) -> str:
 
 def setup_wizard(config, config_path):
     def get_option(prompt, default=''):
-        if default:
-            res = input(prompt + f' [{default}]?: ')
-        else:
-            res = input(prompt + ': ')
+        res = input(f'{prompt} [{default}]?: ') if default else input(f'{prompt}: ')
         if not res:
             res = default
         return res
@@ -428,7 +416,7 @@ async def main():
             except ValueError:
                 print(
                     f'{args.offset} is neither an integer nor matches format {config.get("global", "date_format")}.')
-                print(f'Try to run script with -h to get help')
+                print('Try to run script with -h to get help')
                 raise SystemExit(1)
 
         # Highlight date if report date if weekend
